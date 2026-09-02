@@ -17,6 +17,8 @@ class SuccessCriteria(BaseModel):
 
 
 class AttackPattern(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     category: str
     description: str
