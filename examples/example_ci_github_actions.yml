@@ -11,4 +11,14 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install raginject
-      - run: raginject run --target-url http://localhost:8000/query --min-score 0.8
+
+      # Point --target-module at your own RAG entry point instead, e.g.:
+      #   --target-module myapp.rag:answer_question
+      # (it must be importable from the repo root; raginject adds the
+      # current working directory to sys.path for you). This step uses the
+      # dependency-free demo target so the workflow is runnable as-is - see
+      # `raginject.demo` in README.md.
+      - run: |
+          raginject run \
+            --target-module raginject.demo:defended_rag \
+            --min-score 0.8
