@@ -1,0 +1,12 @@
+*.md
+!README.md
+!CONTRIBUTING.md
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.ruff_cache/
+.pytest_cache/
+.venv/
