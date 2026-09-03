@@ -3,8 +3,10 @@ from .adapters import FunctionTarget, HTTPTarget
 from .attacks.loader import load_patterns
 from .attacks.schema import AttackPattern, SuccessCriteria
 from .core import AttackOutcome, Result, Runner
+from .corpus import CorpusInjector
 from .errors import (
     ConfigurationError,
+    CorpusInjectionError,
     PatternError,
     RagInjectError,
     TargetConnectionError,
@@ -28,6 +30,8 @@ __all__ = [
     "AttackOutcome",
     "AttackPattern",
     "ConfigurationError",
+    "CorpusInjectionError",
+    "CorpusInjector",
     "FunctionTarget",
     "HTTPTarget",
     "Judge",

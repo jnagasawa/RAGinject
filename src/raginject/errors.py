@@ -24,7 +24,8 @@ Two branches, and the distinction matters a lot:
     └── TargetError
         ├── TargetConnectionError
         ├── TargetTimeoutError
-        └── TargetResponseError
+        ├── TargetResponseError
+        └── CorpusInjectionError
 """
 
 from typing import Optional
@@ -82,3 +83,12 @@ class TargetTimeoutError(TargetError):
 class TargetResponseError(TargetError):
     """The target responded, but with a non-2xx status, non-JSON body, or a
     body that doesn't satisfy the QueryResult contract."""
+
+
+class CorpusInjectionError(TargetError):
+    """A `CorpusInjector` failed to insert or remove an attack document.
+
+    Deliberately under `TargetError`, not `ConfigurationError`: a failing
+    injector is a run-time failure against one pattern (mode A's equivalent
+    of the target being unreachable), so it becomes a single AttackOutcome
+    with status="error" and the run continues, rather than aborting."""

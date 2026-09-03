@@ -49,7 +49,7 @@ def _result(outcomes) -> Result:
 def test_result_to_dict_schema_version():
     result = _result([_outcome()])
     d = result_to_dict(result)
-    assert d["schema_version"] == REPORT_SCHEMA_VERSION == 1
+    assert d["schema_version"] == REPORT_SCHEMA_VERSION == 2
 
 
 def test_result_to_dict_counts():
@@ -96,6 +96,8 @@ def test_json_report_has_no_secret_fields():
         "started_at",
         "target_description",
         "pattern_count",
+        "mode",
+        "corpus_injector_description",
         "score",
         "counts",
         "outcomes",
@@ -209,6 +211,8 @@ def test_format_json_unaffected_by_text_report_changes():
         "started_at",
         "target_description",
         "pattern_count",
+        "mode",
+        "corpus_injector_description",
         "score",
         "counts",
         "outcomes",

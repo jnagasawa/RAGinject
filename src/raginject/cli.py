@@ -25,7 +25,11 @@ from .attacks.loader import load_default_patterns, load_patterns
 from .core import Runner
 from .errors import ConfigurationError, RagInjectError
 from .report import ReportOptions, available_formatters, get_formatter
-from .resolve import ensure_cwd_importable, resolve_target_spec
+from .resolve import (
+    ensure_cwd_importable,
+    resolve_corpus_injector_spec,
+    resolve_target_spec,
+)
 
 _HTTP_DEFAULTS = {
     "target_method": "POST",
@@ -142,6 +146,29 @@ def _resolve_judge(name: str, *, model, provider, base_url):
     return get_judge(name)
 
 
+def _warn_uncleaned_documents(runner: Optional[Runner]) -> None:
+    """Print the leftover-document warning if `runner` got far enough to
+    exist and ended the run with anything in `uncleaned_document_ids`.
+
+    Called on every exit path out of `run` (success, a below-threshold
+    score, and every error branch) - not just the success path - because a
+    `CorpusInjector.remove` failure that surfaces as a ConfigurationError
+    (or any other exception) must still be reported: an orphaned attack
+    document in the user's corpus is exactly what this warning exists to
+    surface, and it must not go missing just because the run also failed
+    for some other reason.
+    """
+    if runner is None or not runner.uncleaned_document_ids:
+        return
+    click.echo(
+        "warning: the corpus injector failed to remove "
+        f"{len(runner.uncleaned_document_ids)} attack document(s); these "
+        "were left in your corpus and must be deleted manually: "
+        f"{', '.join(runner.uncleaned_document_ids)}",
+        err=True,
+    )
+
+
 def _apply_plugins(plugin: Tuple[str, ...]) -> None:
     """Import each --plugin module so its @register_judge/@register_formatter
     decorators run. Explicit and opt-in: raginject never auto-discovers
@@ -197,6 +224,18 @@ def _apply_plugins(plugin: Tuple[str, ...]) -> None:
 @click.option(
     "--judge-base-url", default=None, help="OpenAI-compatible endpoint, llm_judge only"
 )
+@click.option(
+    "--corpus-injector",
+    default=None,
+    help="module:attribute CorpusInjector spec; enables corpus injection (mode A)",
+)
+@click.option(
+    "--no-verify-retrieval",
+    is_flag=True,
+    default=False,
+    help="don't error rows whose injected document wasn't in the target's sources "
+    "(mode A only)",
+)
 def run(
     target_module,
     target_url,
@@ -219,6 +258,8 @@ def run(
     judge_model,
     judge_provider,
     judge_base_url,
+    corpus_injector,
+    no_verify_retrieval,
 ):
     """Run attack patterns against a target and report the result.
 
@@ -226,6 +267,12 @@ def run(
     1 = score below --min-score; 2 = configuration error, target never
     reached, or an unexpected crash.
     """
+    # Assigned once the target/injector are resolved and Runner() is
+    # constructed - stays None if setup itself fails, so the except
+    # handlers below can safely check it before warning about leftover
+    # documents (there is nothing to have left behind if we never got
+    # this far).
+    runner: Optional[Runner] = None
     try:
         # Plugins first: a --plugin module may register the formatter that
         # --output names, so validating the format before importing them
@@ -270,6 +317,16 @@ def run(
             else None
         )
 
+        if no_verify_retrieval and not corpus_injector:
+            # Meaningless in mode B (there is no retrieval step to verify),
+            # and silently ignoring a flag the user passed is exactly the
+            # failure the --target-module/HTTP-flags check above guards
+            # against - so this is a hard error, not a no-op.
+            raise ConfigurationError(
+                "--no-verify-retrieval only applies to corpus injection mode; "
+                "pass --corpus-injector to enable mode A"
+            )
+
         target = _build_target(
             target_module=target_module,
             target_url=target_url,
@@ -282,10 +339,18 @@ def run(
             timeout=timeout,
         )
 
+        injector = (
+            resolve_corpus_injector_spec(corpus_injector)
+            if corpus_injector is not None
+            else None
+        )
+
         runner = Runner(
             target,
             judge_override=judge_override,
             verify_leaks_judge=verify_leaks_judge,
+            corpus_injector=injector,
+            verify_retrieval=not no_verify_retrieval,
         )
         _load_all_patterns(runner, patterns, no_default_patterns)
         try:
@@ -298,6 +363,8 @@ def run(
         options = ReportOptions(max_answer_chars=max_answer_chars, verbose=verbose)
         rendered = formatter(result, options)
         click.echo(rendered)
+
+        _warn_uncleaned_documents(runner)
 
         if not result.has_scoreable_outcomes:
             click.echo(
@@ -318,11 +385,13 @@ def run(
         sys.exit(0 if result.score >= min_score else 1)
 
     except ConfigurationError as exc:
+        _warn_uncleaned_documents(runner)
         click.echo(f"error: {exc}", err=True)
         sys.exit(2)
     except SystemExit:
         raise
     except Exception as exc:
+        _warn_uncleaned_documents(runner)
         if os.environ.get("RAGINJECT_DEBUG"):
             raise
         click.echo(

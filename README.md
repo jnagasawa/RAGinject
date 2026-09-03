@@ -43,6 +43,7 @@ a full run costs nothing and takes milliseconds.
 - [Quickstart](#quickstart)
   - [Python API](#python-api) · [CLI](#cli) · [In your pytest suite](#in-your-pytest-suite) · [In CI](#in-ci-github-actions)
 - [How it works](#how-it-works)
+- [Corpus injection (mode A)](#corpus-injection-mode-a)
 - [What raginject measures (and what it doesn't)](#what-raginject-measures-and-what-it-doesnt)
 - [CLI reference](#cli-reference)
 - [Custom attack patterns](#custom-attack-patterns)
@@ -66,11 +67,12 @@ raginject makes that regression visible the same way a test suite makes a
 broken function visible. It asks little of your pipeline: point it at a
 Python function or an HTTP endpoint, and the only thing that has to change is
 accepting a `context` argument (one parameter, one seam - your retrieval and
-prompting logic stay untouched). Corpus injection (mode A), on the roadmap,
-will remove even that requirement by swapping the retriever instead. It's
-cheap and deterministic, since the built-in `keyword_match` judge is plain
-string matching, so there are no API keys, no per-run cost, and no flaky
-verdicts.
+prompting logic stay untouched). Or skip that seam entirely with [corpus
+injection](#corpus-injection-mode-a): raginject writes the attack document
+into your real corpus and lets your own retriever surface it, so even a
+question-only pipeline is testable. It's cheap and deterministic, since the
+built-in `keyword_match` judge is plain string matching, so there are no API
+keys, no per-run cost, and no flaky verdicts.
 `--min-score` makes it a real gate: the process exits `1` when a pull request
 weakens your defenses, so it fails CI instead of merging quietly. And it's
 yours to extend, since attack patterns are plain YAML you can write, and
@@ -364,18 +366,102 @@ It's a starting point, not a benchmark. The patterns that matter most for
 your app are the ones you write yourself (see
 [Custom attack patterns](#custom-attack-patterns)).
 
+## Corpus injection (mode A)
+
+Mode B (above) hands `injected_content` straight to your target as
+`context`, bypassing your retriever entirely. Mode A removes that
+requirement: raginject writes the attack document into your real corpus
+through a `CorpusInjector` you provide, asks the question with no `context`
+argument at all, lets your retriever decide whether the document surfaces,
+and deletes it again afterward - so a question-only pipeline
+(`def my_rag(question)`) becomes testable, and the score starts covering
+retrieval, not just generation.
+
+```mermaid
+flowchart LR
+    P["attack pattern (YAML)<br/>injected_content + question"] --> I["CorpusInjector.inject"]
+    I --> R["raginject Runner"]
+    R -->|"question only, no context"| T["your pipeline<br/>retrieves from the real corpus"]
+    T -->|"answer + sources"| V["retrieval check<br/>was the document in sources?"]
+    V -->|"yes"| J["judge<br/>keyword_match"]
+    V -->|"no"| E["status: error<br/>(excluded from score)"]
+    J --> S["score + report<br/>exit 0 / 1 / 2"]
+    R --> X["CorpusInjector.remove<br/>(always runs)"]
+```
+
+Implement `CorpusInjector` - two operations, paired by raginject around
+every pattern:
+
+```python
+from raginject import CorpusInjector
+
+
+class MyCorpusInjector(CorpusInjector):
+    def inject(self, document_id: str, content: str) -> None:
+        my_vector_store.upsert(id=document_id, text=content)
+
+    def remove(self, document_id: str) -> None:
+        # Must be idempotent: called with an id that was never inserted (or
+        # was already removed) must not raise.
+        my_vector_store.delete(id=document_id, missing_ok=True)
+```
+
+Point `raginject run` at it with `--corpus-injector`:
+
+```bash
+raginject run --target-module myapp.rag:answer_question \
+              --corpus-injector myapp.injector:MyCorpusInjector
+```
+
+`--target-module`/`--target-url` name the target as usual; the target
+function itself no longer needs a `context` parameter at all, since mode A
+never passes one.
+
+**Retrieval verification.** After each query, raginject checks whether the
+document it just injected (id `raginject-<pattern.id>`) shows up among the
+`sources` your target returned (a source that merely *contains* the id also
+counts, so a suffixed filename or a path still matches). If it doesn't, the
+row becomes `status: error` - excluded from the score, not scored as
+`blocked` - because a defense that was never tested isn't a defense that
+held. If your target doesn't return `sources` at all, verification is
+skipped for those rows (raginject warns once per run) and everything is
+judged normally; pass `--no-verify-retrieval` to disable the check
+entirely (for example, if your pipeline returns opaque hashed source ids
+that would never match).
+
+Try it against the bundled demo corpus, no RAG app required:
+
+```bash
+raginject run --target-module raginject.demo:vulnerable_corpus_rag \
+              --corpus-injector raginject.demo:demo_corpus_injector
+# -> score 0.00
+
+raginject run --target-module raginject.demo:defended_corpus_rag \
+              --corpus-injector raginject.demo:demo_corpus_injector \
+              --min-score 1.0
+# -> score 1.00, exit 0
+```
+
+A full runnable example, with an in-memory corpus and a question-only RAG
+function, is in
+[`examples/example_corpus_injector.py`](examples/example_corpus_injector.py).
+
 ## What raginject measures (and what it doesn't)
 
-**It measures your generation step.** Attack content is handed to your target
-directly through the `context` channel, as if it had already been retrieved.
-That's *mode B*: direct context injection. It does **not** insert attack
-documents into your real retrieval corpus and exercise your retriever (*mode
-A*, corpus injection); that's planned for a future release. In short, today
-raginject tells you whether your generation step resists instructions smuggled
-inside retrieved documents, not whether your retriever would ever surface such
-a document in the first place. This is also why your pipeline must expose a
-`context` parameter: it's the channel mode B uses to hand attack content to
-your target directly.
+**Mode B measures generation only.** By default, attack content is handed to
+your target directly through the `context` channel, as if it had already been
+retrieved - this is *mode B*: direct context injection. It tells you whether
+your generation step resists instructions smuggled inside retrieved
+documents, but it does not exercise your retriever at all: a document that
+your real retriever would never surface still gets judged as if it had been.
+This is also why mode B requires your pipeline to expose a `context`
+parameter - see [Function signature detection](#function-signature-detection).
+
+**Mode A (corpus injection) measures retrieval too**, and needs no `context`
+parameter: raginject writes the attack document into your real corpus, asks
+the question with nothing but `question`, lets your own retriever decide
+whether it surfaces, and deletes the document afterward. See [Corpus
+injection (mode A)](#corpus-injection-mode-a) below.
 
 **`keyword_match` cannot tell "obeyed" from "quoted".** The only judge in the
 current release checks whether any string in
@@ -445,6 +531,8 @@ runtime defense: nothing here protects a production request.
 | `--judge-model` | none | Model name (`llm_judge` only) |
 | `--judge-provider` | none | `openai` or `anthropic` (`llm_judge` only) |
 | `--judge-base-url` | none | OpenAI-compatible endpoint, e.g. an OpenRouter URL (`llm_judge` only) |
+| `--corpus-injector` | none | `module:attribute` `CorpusInjector` spec; enables corpus injection (mode A) |
+| `--no-verify-retrieval` | off | Don't error rows whose injected document wasn't in the target's `sources` (mode A only) |
 
 `--target-module` and the HTTP-specific flags are mutually exclusive;
 combining them is a configuration error (exit `2`) rather than a silently

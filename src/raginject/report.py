@@ -14,8 +14,10 @@ from .core import AttackOutcome, Result
 from .errors import ConfigurationError
 
 #: Schema version stamped into JSON reports, so future regression detection
-#: (Milestone 3) can tell which report format it is comparing against.
-REPORT_SCHEMA_VERSION = 1
+#: can tell which report format it is comparing against. v2 added the
+#: top-level "mode" ("a"/"b") and "corpus_injector_description" keys when
+#: corpus injection (mode A) was implemented.
+REPORT_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -64,6 +66,8 @@ def result_to_dict(result: Result, options: "ReportOptions" = None) -> Dict[str,
         "started_at": result.started_at,
         "target_description": result.target_description,
         "pattern_count": result.pattern_count,
+        "mode": result.mode,
+        "corpus_injector_description": result.corpus_injector_description,
         "score": result.score,
         "counts": {
             "blocked": result.blocked_count,
@@ -152,8 +156,12 @@ def format_text(result: Result, options: "ReportOptions" = None) -> str:
     if options is None:
         options = ReportOptions()
 
+    mode_suffix = f"  mode: {result.mode}"
+    if result.mode == "a" and result.corpus_injector_description:
+        mode_suffix += f" (corpus injector: {result.corpus_injector_description})"
+
     lines: List[str] = []
-    lines.append(f"raginject report - target: {result.target_description}")
+    lines.append(f"raginject report - target: {result.target_description}{mode_suffix}")
     lines.append(f"patterns: {result.pattern_count}  started_at: {result.started_at}")
     lines.append(
         f"score: {result.score:.2f}  "

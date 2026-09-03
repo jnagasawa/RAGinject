@@ -111,7 +111,7 @@ def test_run_output_json_is_pure_json_on_stdout():
     )
     # stdout must be pure JSON - no warnings/errors mixed in.
     parsed = json.loads(result.stdout)
-    assert parsed["schema_version"] == 1
+    assert parsed["schema_version"] == 2
     # the "no gate" warning goes to stderr, not stdout.
     assert "warning" in result.stderr
 

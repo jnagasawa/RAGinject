@@ -61,10 +61,11 @@ wordmark stays in documentation, where none of that can bite.
   implement `src/raginject/judges/base.py`. New adapters implement
   `src/raginject/target.py`'s `Target`.
 - Add/update tests under `tests/` for any new behavior.
-- Ask as little of the user's pipeline as possible. Today the only thing
-  raginject requires is that a target accept a `context` argument (mode B's
-  injection channel). Don't add a second such requirement — no mandatory
-  callbacks, config files, or wrappers around their retriever.
+- Ask as little of the user's pipeline as possible. Mode B requires a
+  target to accept a `context` argument (its injection channel); mode A
+  requires none at all, trading that for a `CorpusInjector` the user writes
+  once. Don't add a third mandatory requirement — no mandatory callbacks,
+  config files, or wrappers around their retriever beyond those two paths.
 - `Target` implementations must be safe for concurrent `query()` calls. This
   isn't exercised in Milestone 1, but a future `--concurrency` option will
   call `query()` from multiple threads at once, and that must not require a
@@ -178,6 +179,49 @@ Reuse `normalize_query_result()` (from `src/raginject/target.py`) rather than
 hand-rolling response validation — it's what gives `FunctionTarget` and
 `HTTPTarget` their consistent, informative error messages for a malformed
 response, and new adapters should match that behavior.
+
+## Writing a `CorpusInjector`
+
+`CorpusInjector` (`raginject.corpus`) is the corpus-injection (mode A) hook:
+subclass it and implement `inject`/`remove`.
+
+```python
+from raginject import CorpusInjector
+
+
+class YourCorpusInjector(CorpusInjector):
+    def inject(
+        self, document_id: str, content: str
+    ) -> None: ...  # write `content` into your real corpus under `document_id`
+
+    def remove(self, document_id: str) -> None: ...  # delete it again
+
+    @property
+    def description(self) -> str:
+        return "a short, secret-free description shown in reports"
+```
+
+A few rules worth knowing before you write one:
+
+- `remove` **must be idempotent**: raginject always pairs one `inject` with
+  one `remove` per attack pattern, and calls `remove` in a `finally` even
+  when the target or the judge raised. A `remove` call for a document id
+  that was never inserted (or was already removed) must not raise.
+- `description` (like `Target.target_description`) is shown in reports -
+  never let it leak connection strings, API keys, or other secrets.
+- Thread safety: if this injector is ever driven with concurrency > 1,
+  `inject`/`remove` must be safe to call concurrently. Guard any mutable
+  shared state accordingly.
+- Point `raginject run --corpus-injector your_module:YourCorpusInjector` at
+  it (a class is instantiated with zero arguments; an already-built instance
+  is used directly). There is deliberately no bare-callable fallback here,
+  unlike `--target-module` - `inject`/`remove` are two paired operations, so
+  a single callable would be ambiguous about which one it implements.
+- Raise `raginject.CorpusInjectionError` from `inject`/`remove` to signal a
+  corpus-specific failure explicitly (it's caught the same way as any other
+  exception - a single `status="error"` row, and the run continues - but
+  naming it documents the failure as belonging to the corpus rather than
+  the target or the judge).
 
 ## Adding a report formatter
 
