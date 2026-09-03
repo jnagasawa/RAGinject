@@ -124,6 +124,24 @@ def _load_all_patterns(
         runner.load_patterns(path)
 
 
+def _resolve_judge(name: str, *, model, provider, base_url):
+    """Resolve a `--judge`/`--verify-leaks` name into a Judge instance.
+
+    `llm_judge` is special-cased so `--judge-model`/`--judge-provider`/
+    `--judge-base-url` can configure it without a plugin; any other name
+    goes through the normal registry lookup (lazy-imported for built-ins,
+    or registered by a `--plugin` module).
+    """
+    if name == "llm_judge":
+        from .judges.llm_judge import LLMJudge
+
+        return LLMJudge(model=model, provider=provider, base_url=base_url)
+
+    from .judges import get_judge
+
+    return get_judge(name)
+
+
 def _apply_plugins(plugin: Tuple[str, ...]) -> None:
     """Import each --plugin module so its @register_judge/@register_formatter
     decorators run. Explicit and opt-in: raginject never auto-discovers
@@ -164,6 +182,21 @@ def _apply_plugins(plugin: Tuple[str, ...]) -> None:
 @click.option("--max-answer-chars", default=2000, show_default=True, type=int)
 @click.option("--min-score", default=None, type=float)
 @click.option("--verbose", is_flag=True, default=False)
+@click.option(
+    "--judge", default=None, help="judge name overriding every pattern's judge"
+)
+@click.option(
+    "--verify-leaks",
+    default=None,
+    help="judge name used to re-judge only the rows the primary judge marked leaked",
+)
+@click.option("--judge-model", default=None, help="model name, llm_judge only")
+@click.option(
+    "--judge-provider", default=None, help="'openai' or 'anthropic', llm_judge only"
+)
+@click.option(
+    "--judge-base-url", default=None, help="OpenAI-compatible endpoint, llm_judge only"
+)
 def run(
     target_module,
     target_url,
@@ -181,6 +214,11 @@ def run(
     max_answer_chars,
     min_score,
     verbose,
+    judge,
+    verify_leaks,
+    judge_model,
+    judge_provider,
+    judge_base_url,
 ):
     """Run attack patterns against a target and report the result.
 
@@ -201,6 +239,37 @@ def run(
             )
         formatter = get_formatter(output)
 
+        judge_flags_given = any(
+            v is not None for v in (judge_model, judge_provider, judge_base_url)
+        )
+        if judge_flags_given and "llm_judge" not in (judge, verify_leaks):
+            raise ConfigurationError(
+                "--judge-model/--judge-provider/--judge-base-url only apply "
+                "to llm_judge; pass --judge llm_judge or --verify-leaks "
+                "llm_judge to use them"
+            )
+
+        judge_override = (
+            _resolve_judge(
+                judge,
+                model=judge_model,
+                provider=judge_provider,
+                base_url=judge_base_url,
+            )
+            if judge is not None
+            else None
+        )
+        verify_leaks_judge = (
+            _resolve_judge(
+                verify_leaks,
+                model=judge_model,
+                provider=judge_provider,
+                base_url=judge_base_url,
+            )
+            if verify_leaks is not None
+            else None
+        )
+
         target = _build_target(
             target_module=target_module,
             target_url=target_url,
@@ -213,7 +282,11 @@ def run(
             timeout=timeout,
         )
 
-        runner = Runner(target)
+        runner = Runner(
+            target,
+            judge_override=judge_override,
+            verify_leaks_judge=verify_leaks_judge,
+        )
         _load_all_patterns(runner, patterns, no_default_patterns)
         try:
             result = runner.run()

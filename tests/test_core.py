@@ -292,3 +292,125 @@ def test_context_passed_is_single_element_list_of_injected_content():
     runner.add_patterns([pattern])
     runner.run()
     assert target.received_context == [[pattern.injected_content]]
+
+
+class _AlwaysLeaksJudge(Judge):
+    def __init__(self):
+        self.call_count = 0
+
+    def judge(self, ctx: JudgeContext) -> Verdict:
+        self.call_count += 1
+        return Verdict(attack_succeeded=True, reason="always leaks")
+
+
+class _AlwaysBlocksJudge(Judge):
+    def __init__(self):
+        self.call_count = 0
+
+    def judge(self, ctx: JudgeContext) -> Verdict:
+        self.call_count += 1
+        return Verdict(attack_succeeded=False, reason="always blocks")
+
+
+class _RaisingVerifierJudge(Judge):
+    def __init__(self):
+        self.call_count = 0
+
+    def judge(self, ctx: JudgeContext) -> Verdict:
+        self.call_count += 1
+        raise RuntimeError("verifier exploded")
+
+
+class _RecordingValidateJudge(Judge):
+    """Records every success_criteria it was asked to validate, and blocks
+    every attack - used to prove which judge's validate_criteria ran."""
+
+    def __init__(self):
+        self.validated = []
+
+    def validate_criteria(self, criteria):
+        self.validated.append(criteria)
+
+    def judge(self, ctx: JudgeContext) -> Verdict:
+        return Verdict(attack_succeeded=False, reason="override judge")
+
+
+def test_judge_override_replaces_judge_for_every_pattern_and_runs_its_preflight():
+    target = _FakeTarget(lambda q: {"answer": "here is SECRET", "sources": []})
+    override = _RecordingValidateJudge()
+    runner = Runner(target, judge_override=override)
+    runner.add_patterns([_pattern("p1"), _pattern("p2", judge_type="keyword_match")])
+    result = runner.run()
+    # Every row judged "blocked" by the override, even though keyword_match
+    # (the pattern's declared judge) would have called it "leaked".
+    assert all(o.status == "blocked" for o in result.outcomes)
+    assert len(override.validated) == 2
+
+
+def test_verify_leaks_judge_only_re_judges_leaked_rows():
+    target = _FakeTarget(
+        lambda q: (
+            {"answer": "here is SECRET", "sources": []}
+            if q == "leak-q"
+            else {"answer": "clean", "sources": []}
+        )
+    )
+    verifier = _AlwaysBlocksJudge()
+    runner = Runner(target, verify_leaks_judge=verifier)
+    leaked_pattern = _pattern("leaked", forbidden=("SECRET",))
+    leaked_pattern = leaked_pattern.model_copy(update={"question": "leak-q"})
+    blocked_pattern = _pattern("blocked", forbidden=("SECRET",))
+    blocked_pattern = blocked_pattern.model_copy(update={"question": "clean-q"})
+    runner.add_patterns([leaked_pattern, blocked_pattern])
+    runner.run()
+    # Only the row that came out "leaked" from the primary judge triggers a
+    # verification call - the blocked row is never re-judged.
+    assert verifier.call_count == 1
+
+
+def test_verify_leaks_judge_flips_leaked_row_to_blocked_and_keeps_both_reasons():
+    target = _FakeTarget(lambda q: {"answer": "here is SECRET", "sources": []})
+    verifier = _AlwaysBlocksJudge()
+    runner = Runner(target, verify_leaks_judge=verifier)
+    runner.add_patterns([_pattern("p1")])
+    result = runner.run()
+    outcome = result.outcomes[0]
+    assert outcome.status == "blocked"
+    assert "always blocks" in outcome.verdict_reason
+    assert "forbidden strings found" in outcome.verdict_reason
+    assert " | " in outcome.verdict_reason
+
+
+def test_verify_leaks_judge_leaves_verdict_leaked_when_it_agrees():
+    target = _FakeTarget(lambda q: {"answer": "here is SECRET", "sources": []})
+    verifier = _AlwaysLeaksJudge()
+    runner = Runner(target, verify_leaks_judge=verifier)
+    runner.add_patterns([_pattern("p1")])
+    result = runner.run()
+    assert result.outcomes[0].status == "leaked"
+    assert verifier.call_count == 1
+
+
+def test_verify_leaks_judge_exception_makes_row_error_and_leaves_others_alone():
+    target = _FakeTarget(lambda q: {"answer": "here is SECRET", "sources": []})
+    verifier = _RaisingVerifierJudge()
+    runner = Runner(target, verify_leaks_judge=verifier)
+    runner.add_patterns([_pattern("leaks-then-errors")])
+    good_target_pattern = _pattern("other", forbidden=("NOPE",))
+    runner.add_patterns([good_target_pattern])
+    result = runner.run()
+    by_id = {o.pattern_id: o for o in result.outcomes}
+    assert by_id["leaks-then-errors"].status == "error"
+    assert by_id["leaks-then-errors"].error is not None
+    # The other pattern's row (no forbidden-string match -> "blocked", never
+    # re-judged) is unaffected by the verifier blowing up on the first row.
+    assert by_id["other"].status == "blocked"
+
+
+def test_verify_leaks_judge_validate_criteria_runs_in_preflight():
+    target = _FakeTarget(lambda q: {"answer": "ok", "sources": []})
+    verifier = _RecordingValidateJudge()
+    runner = Runner(target, verify_leaks_judge=verifier)
+    runner.add_patterns([_pattern("p1"), _pattern("p2")])
+    runner.run()
+    assert len(verifier.validated) == 2

@@ -236,3 +236,74 @@ def test_plugin_module_in_cwd_is_importable(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert "from cwd plugin" in result.output
+
+
+def test_judge_flag_overrides_every_pattern_judge(tmp_path, monkeypatch):
+    # vulnerable_rag echoes injected content, so under the default
+    # keyword_match judge this pattern would leak; --judge points every
+    # pattern at a plugin judge that always blocks instead.
+    (tmp_path / "always_blocks_judge.py").write_text(
+        "from raginject import Judge, Verdict, register_judge\n"
+        "\n"
+        "@register_judge('cli_always_blocks')\n"
+        "class _J(Judge):\n"
+        "    def judge(self, ctx):\n"
+        "        return Verdict(attack_succeeded=False, reason='cli override')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    result = _make_runner().invoke(
+        main,
+        [
+            "run",
+            "--target-module",
+            "raginject.demo:vulnerable_rag",
+            "--plugin",
+            "always_blocks_judge",
+            "--judge",
+            "cli_always_blocks",
+            "--min-score",
+            "1.0",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_verify_leaks_flag_flips_leaked_rows_to_blocked(tmp_path, monkeypatch):
+    (tmp_path / "always_blocks_judge2.py").write_text(
+        "from raginject import Judge, Verdict, register_judge\n"
+        "\n"
+        "@register_judge('cli_verifier_blocks')\n"
+        "class _J(Judge):\n"
+        "    def judge(self, ctx):\n"
+        "        return Verdict(attack_succeeded=False, reason='cli verifier')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    result = _make_runner().invoke(
+        main,
+        [
+            "run",
+            "--target-module",
+            "raginject.demo:vulnerable_rag",
+            "--plugin",
+            "always_blocks_judge2",
+            "--verify-leaks",
+            "cli_verifier_blocks",
+            "--min-score",
+            "1.0",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_judge_model_flag_without_llm_judge_is_configuration_error():
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:defended_rag",
+        "--judge-model",
+        "gpt-4o-mini",
+    )
+    assert result.exit_code == 2
+    assert "llm_judge" in result.stderr

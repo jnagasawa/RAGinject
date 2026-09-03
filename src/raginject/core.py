@@ -135,13 +135,29 @@ class Runner:
 
     `judges`, if given, takes priority over the module-level judge registry
     for lookups by name - this lets callers inject a fake judge in tests, or
-    a pre-configured judge instance (e.g. a Milestone 2 `LLMJudge(model=...)`)
-    without needing a factory-based registry.
+    a pre-configured judge instance (e.g. `LLMJudge(model=...)`) without
+    needing a factory-based registry.
+
+    `judge_override`, if given, replaces the judge named by every pattern's
+    `success_criteria.type` - every pattern is judged by this one judge
+    instead. `verify_leaks_judge`, if given, re-judges only the rows the
+    primary judge marked "leaked" (never "blocked" ones, since that is
+    where a judge's false positives live) and can flip a leaked row to
+    blocked; see `run()` for the exact semantics.
     """
 
-    def __init__(self, target: Target, judges: Optional[Mapping[str, Judge]] = None):
+    def __init__(
+        self,
+        target: Target,
+        judges: Optional[Mapping[str, Judge]] = None,
+        *,
+        judge_override: Optional[Judge] = None,
+        verify_leaks_judge: Optional[Judge] = None,
+    ):
         self.target = target
         self._judges = judges
+        self._judge_override = judge_override
+        self._verify_leaks_judge = verify_leaks_judge
         self._patterns: Dict[str, AttackPattern] = {}
 
     @property
@@ -185,10 +201,15 @@ class Runner:
 
         judge_for_pattern: Dict[str, Judge] = {}
         for pattern in patterns:
-            judge_name = pattern.success_criteria.type
-            judge = self._get_judge(judge_name)
+            if self._judge_override is not None:
+                judge = self._judge_override
+            else:
+                judge_name = pattern.success_criteria.type
+                judge = self._get_judge(judge_name)
             judge.validate_criteria(pattern.success_criteria)
             judge_for_pattern[pattern.id] = judge
+            if self._verify_leaks_judge is not None:
+                self._verify_leaks_judge.validate_criteria(pattern.success_criteria)
 
         started_at = datetime.now(timezone.utc).isoformat()
         outcomes: List[AttackOutcome] = []
@@ -251,10 +272,58 @@ class Runner:
                         sources=sources,
                     )
                 )
-                duration_ms = (time.perf_counter() - start) * 1000
                 status: AttackStatus = (
                     "leaked" if verdict.attack_succeeded else "blocked"
                 )
+                verdict_reason = verdict.reason
+
+                # Only leaked rows are worth a second look: keyword_match's
+                # false positives (a correct refusal that names the canary)
+                # only exist among rows it called "leaked" - a blocked row
+                # can't be a false leak, so re-judging it would just spend
+                # API calls for no possible change in outcome.
+                if self._verify_leaks_judge is not None and status == "leaked":
+                    try:
+                        verify_verdict = self._verify_leaks_judge.judge(
+                            JudgeContext(
+                                pattern=pattern,
+                                question=pattern.question,
+                                answer=answer,
+                                sources=sources,
+                            )
+                        )
+                        if not verify_verdict.attack_succeeded:
+                            status = "blocked"
+                        verdict_reason = f"{verdict_reason} | {verify_verdict.reason}"
+                    except ConfigurationError:
+                        raise
+                    except Exception as exc:
+                        duration_ms = (time.perf_counter() - start) * 1000
+                        outcome = AttackOutcome(
+                            pattern_id=pattern.id,
+                            category=pattern.category,
+                            status="error",
+                            question=pattern.question,
+                            injected_content=pattern.injected_content,
+                            answer=answer,
+                            sources=sources,
+                            verdict_reason="leak-verification judge raised an "
+                            "exception",
+                            # The primary verdict was "leaked" - it is being
+                            # re-judged precisely because that verdict is
+                            # unreliable, so silently keeping it and reporting
+                            # a possibly-false leak as fact would be worse
+                            # than excluding the row from the score.
+                            error=f"verify-leaks judge failed: "
+                            f"{type(exc).__name__}: {exc}",
+                            duration_ms=duration_ms,
+                        )
+                        outcomes.append(outcome)
+                        if on_outcome is not None:
+                            on_outcome(outcome)
+                        continue
+
+                duration_ms = (time.perf_counter() - start) * 1000
                 outcome = AttackOutcome(
                     pattern_id=pattern.id,
                     category=pattern.category,
@@ -263,7 +332,7 @@ class Runner:
                     injected_content=pattern.injected_content,
                     answer=answer,
                     sources=sources,
-                    verdict_reason=verdict.reason,
+                    verdict_reason=verdict_reason,
                     error=None,
                     duration_ms=duration_ms,
                 )

@@ -7,6 +7,7 @@ held. Do not conflate the two.
 """
 
 import difflib
+import importlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Type
@@ -53,6 +54,15 @@ class Judge(ABC):
 _JUDGE_REGISTRY: Dict[str, Type[Judge]] = {}
 _JUDGE_INSTANCES: Dict[str, Judge] = {}
 
+#: Built-in judges that are not imported eagerly from `judges/__init__.py`
+#: (because doing so would pull an optional SDK into every `import
+#: raginject`). On a registry miss, `get_judge` imports the named module
+#: (relative to this package) so its `@register_judge` decorator runs, then
+#: retries the lookup once. Any other unknown name is unaffected.
+_LAZY_JUDGE_MODULES: Dict[str, str] = {
+    "llm_judge": ".llm_judge",
+}
+
 
 def register_judge(name: str):
     """Class decorator: register a Judge implementation under `name` so it can
@@ -77,6 +87,10 @@ def get_judge(name: str) -> Judge:
         return _JUDGE_INSTANCES[name]
 
     judge_cls = _JUDGE_REGISTRY.get(name)
+    if judge_cls is None and name in _LAZY_JUDGE_MODULES:
+        importlib.import_module(_LAZY_JUDGE_MODULES[name], package=__package__)
+        judge_cls = _JUDGE_REGISTRY.get(name)
+
     if judge_cls is None:
         known = available_judges()
         suggestions = difflib.get_close_matches(name, known)
@@ -93,5 +107,8 @@ def get_judge(name: str) -> Judge:
 
 
 def available_judges() -> List[str]:
-    """Names of all currently registered judges."""
-    return sorted(_JUDGE_REGISTRY.keys())
+    """Names of all currently registered judges, including built-in judges
+    that are lazily imported on first use (see `_LAZY_JUDGE_MODULES`) - so
+    the "available judges" list and did-you-mean suggestions mention them
+    even before anything has triggered the import."""
+    return sorted(set(_JUDGE_REGISTRY.keys()) | set(_LAZY_JUDGE_MODULES.keys()))
