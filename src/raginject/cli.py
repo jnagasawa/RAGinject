@@ -1,6 +1,6 @@
-"""CLI entry point: thin wrapper over core.py (see PLAN.md 8).
+"""CLI entry point: thin wrapper over core.py.
 
-Exit codes (see PLAN.md §8 / the Task 2 plan):
+Exit codes:
 - 0: score >= --min-score, OR --min-score was not given at all (a warning
      is printed to stderr in that case: no gate is in effect)
 - 1: --min-score was given AND the score is below it. This is the only
@@ -8,8 +8,9 @@ Exit codes (see PLAN.md §8 / the Task 2 plan):
 - 2: any ConfigurationError (bad flags, unknown judge, zero patterns, ...),
      OR zero scoreable outcomes (every row errored - the target was never
      reached, so returning 1 would misreport connectivity failure as a
-     security failure - PLAN.md §4.3 forbids that), OR an unexpected
-     exception (set RAGINJECT_DEBUG=1 to see the traceback instead).
+     security failure: reporting a run that never reached the target as a
+     security failure would be misleading), OR an unexpected exception (set
+     RAGINJECT_DEBUG=1 to see the traceback instead).
 """
 
 import importlib

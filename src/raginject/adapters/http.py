@@ -1,4 +1,4 @@
-"""HTTPTarget: wrap an HTTP endpoint as a Target, per the raginject HTTP contract (see PLAN.md 4.3)."""
+"""HTTPTarget: wrap an HTTP endpoint as a Target, per the raginject HTTP contract."""
 
 from typing import List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
@@ -20,7 +20,7 @@ _SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH"})
 class HTTPTarget(Target):
     """Wrap an HTTP endpoint as a Target.
 
-    Default wire contract (PLAN.md §4.3): POST a JSON body
+    Default wire contract: POST a JSON body
     ``{"question": ..., "context": [...]}`` and expect back
     ``{"answer": ..., "sources": [...]}``. Key names are configurable via
     `request_key`/`request_context_key`/`response_answer_key`/

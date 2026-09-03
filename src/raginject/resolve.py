@@ -1,5 +1,5 @@
 """Resolve a `module:attribute` spec (as passed to `--target-module`) into a
-Target instance. See PLAN.md / the Task 2 plan's Phase 6.
+Target instance.
 
 Dispatch order matters (a `Target` subclass may itself define `__call__`,
 so the `isinstance` check for an already-built `Target` instance must come

@@ -99,9 +99,9 @@ def test_function_target_defaults_missing_sources_to_empty_list():
 
 
 def test_function_target_async_def_driven_from_inside_running_event_loop():
-    # Proves decision B: an async target must work even when called from a
-    # thread that already has a running event loop (e.g. an async test
-    # harness), not just from plain sync code.
+    # Proves an async target must work even when called from a thread that
+    # already has a running event loop (e.g. an async test harness), not
+    # just from plain sync code.
     async def rag(question, context=None):
         await asyncio.sleep(0)
         return {"answer": "|".join(context or []), "sources": []}

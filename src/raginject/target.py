@@ -37,8 +37,8 @@ class Target(ABC):
         return a QueryResult.
 
         `context` is the list of documents that should be treated as if they
-        were retrieved for this query (see PLAN.md §4.1). `None` or an empty
-        list means a normal, uninjected query.
+        were retrieved for this query. `None` or an empty list means a
+        normal, uninjected query.
         """
         ...
 

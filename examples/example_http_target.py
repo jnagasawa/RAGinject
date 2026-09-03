@@ -1,5 +1,5 @@
-"""Evaluate a RAG pipeline exposed over HTTP (see PLAN.md 4.3 / README.md's
-"HTTP target" section for the default wire contract)."""
+"""Evaluate a RAG pipeline exposed over HTTP (see README.md's "HTTP target"
+section for the default wire contract)."""
 
 from raginject import HTTPTarget, Runner
 

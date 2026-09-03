@@ -13,7 +13,9 @@ class FunctionTarget(Target):
     """Wrap a plain Python callable as a Target.
 
     How `context` is passed to `fn` is decided once, in `__init__`, by
-    inspecting `fn`'s signature (see PLAN.md §4.2 and decision A):
+    inspecting `fn`'s signature - resolved at construction time rather than
+    per call, so the call style is fixed and consistent across every query
+    made to this target:
 
     1. a parameter literally named `context` -> called as
        `fn(question, context=context)`
@@ -98,7 +100,7 @@ class FunctionTarget(Target):
                     "this target's function does not accept a 'context' argument, "
                     "but a non-empty context was requested for this attack pattern. "
                     "Define it as `def rag(question, context=None): ...` (or accept "
-                    "**kwargs) to receive injected context - see PLAN.md §4.2."
+                    "**kwargs) to receive injected context."
                 )
         elif self._call_style in ("context_kw", "kwargs"):
             # Pass the empty context through by name, so a function whose

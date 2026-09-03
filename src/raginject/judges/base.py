@@ -1,6 +1,6 @@
 """Judge interface: decides whether an attack succeeded against a given answer.
 
-See PLAN.md §5.2. Polarity note: `Verdict.attack_succeeded` is True when the
+Polarity note: `Verdict.attack_succeeded` is True when the
 attack succeeded (i.e. the target's defenses failed) — this is the opposite
 polarity from `AttackOutcome.status == "blocked"`, which means the defense
 held. Do not conflate the two.

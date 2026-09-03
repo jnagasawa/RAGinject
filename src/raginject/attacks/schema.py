@@ -1,4 +1,4 @@
-"""Attack pattern schema (see PLAN.md 5.1)."""
+"""Attack pattern schema."""
 
 from typing import List, Optional
 

@@ -1,9 +1,10 @@
 """Error hierarchy for raginject.
 
-This module imports nothing else from the package (to avoid import cycles —
-see PLAN.md and the Task 1 plan's "circular import" notes).
+This module imports nothing else from the package (to avoid import cycles:
+other modules in the package need to raise these errors, so this module
+must not import back from them).
 
-Two branches, and the distinction matters a lot (see PLAN.md §4.3, §7):
+Two branches, and the distinction matters a lot:
 
 - ``ConfigurationError``: the *user's setup* is wrong (bad CLI flags, a
   function signature that can't accept ``context``, an unknown judge name,
