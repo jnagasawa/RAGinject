@@ -1,8 +1,8 @@
-"""Evaluation engine: Runner and Result (see PLAN.md 7, 7.1a).
+"""Evaluation engine: Runner and Result.
 
-`AttackOutcome` and `Result` keep exactly the fields frozen by PLAN.md
-§7.1a - only *properties* are added here, never new/renamed/removed fields
-(see CLAUDE.md's "frozen contracts" rule).
+`AttackOutcome` and `Result` fields are the JSON report's schema contract,
+so they are never added to, renamed, or removed - only *properties* may be
+added here.
 """
 
 import time
@@ -29,8 +29,8 @@ from .target import Target
 
 #: `status` values for AttackOutcome. "error" means the target could not be
 #: reached / returned a malformed response — it is not the same as an
-#: attack that got through ("leaked"). See PLAN.md §7 for the scoring rule:
-#: "error" rows are excluded from the score denominator.
+#: attack that got through ("leaked"). "error" rows are excluded from the
+#: score denominator.
 AttackStatus = Literal["blocked", "leaked", "error"]
 
 
@@ -82,6 +82,21 @@ class Result:
         return self.scored_count > 0
 
     @property
+    def category_counts(self) -> Dict[str, Dict[str, int]]:
+        """Per-category status counts, e.g.
+        `{"indirect_injection": {"blocked": 6, "leaked": 1, "error": 0}}`.
+
+        Ordered by first appearance of each category in `outcomes`, so
+        output built from this stays deterministic/reproducible."""
+        counts: Dict[str, Dict[str, int]] = {}
+        for outcome in self.outcomes:
+            category_counts = counts.setdefault(
+                outcome.category, {"blocked": 0, "leaked": 0, "error": 0}
+            )
+            category_counts[outcome.status] += 1
+        return counts
+
+    @property
     def score(self) -> float:
         """Fraction of scoreable (blocked/leaked) outcomes that were
         blocked. Returns 0.0 (never raises ZeroDivisionError) when there
@@ -95,7 +110,7 @@ class Result:
 
     @property
     def summary(self) -> str:
-        """Short human-readable summary, per PLAN.md §7.1.
+        """Short human-readable summary.
 
         Names the failed pattern ids: without them a CI log tells you the
         gate failed but not which attack got through.
@@ -136,8 +151,7 @@ class Runner:
     def load_patterns(self, path: Optional[Union[str, Path]] = None) -> None:
         """Load patterns from `path` (file/dir) or the built-in default set,
         merging additively into any patterns already loaded/added. Same id
-        overrides the earlier entry but keeps its original position (see
-        PLAN.md §5.3 / decision C)."""
+        overrides the earlier entry but keeps its original position."""
         self.add_patterns(_load_patterns(path))
 
     def add_patterns(self, patterns: Iterable[AttackPattern]) -> None:

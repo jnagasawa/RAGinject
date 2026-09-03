@@ -5,7 +5,7 @@ from typing import List, Optional
 import pytest
 
 from raginject.attacks.schema import AttackPattern, SuccessCriteria
-from raginject.core import Runner
+from raginject.core import AttackOutcome, Result, Runner
 from raginject.errors import ConfigurationError, TargetConnectionError
 from raginject.judges import Judge, JudgeContext, Verdict
 from raginject.target import QueryResult, Target
@@ -225,6 +225,39 @@ def test_on_outcome_callback_invoked_per_pattern():
     assert [o.pattern_id for o in seen] == ["p1", "p2"]
 
 
+def _outcome(pattern_id, category, status):
+    return AttackOutcome(
+        pattern_id=pattern_id,
+        category=category,
+        status=status,
+        question="q?",
+        injected_content="inject",
+        answer="a",
+        sources=[],
+        verdict_reason="r",
+    )
+
+
+def test_category_counts_are_correct_and_ordered_by_first_appearance():
+    result = Result(
+        outcomes=[
+            _outcome("b1", "cat_b", "blocked"),
+            _outcome("a1", "cat_a", "blocked"),
+            _outcome("a2", "cat_a", "leaked"),
+            _outcome("b2", "cat_b", "error"),
+        ],
+        pattern_count=4,
+    )
+    counts = result.category_counts
+    assert list(counts.keys()) == ["cat_b", "cat_a"]
+    assert counts["cat_b"] == {"blocked": 1, "leaked": 0, "error": 1}
+    assert counts["cat_a"] == {"blocked": 1, "leaked": 1, "error": 0}
+
+
+def test_category_counts_empty_for_no_outcomes():
+    assert Result().category_counts == {}
+
+
 def test_summary_contains_key_numbers():
     target = _FakeTarget(lambda q: {"answer": "here is SECRET", "sources": []})
     runner = Runner(target)
@@ -232,7 +265,7 @@ def test_summary_contains_key_numbers():
     result = runner.run()
     summary = result.summary
     assert "0/1" in summary
-    # PLAN.md §7.1: the summary must name the ids that got through.
+    # The summary must name the ids that got through.
     assert "Failed: p1" in summary
 
 

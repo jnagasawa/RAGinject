@@ -118,12 +118,101 @@ def test_format_text_includes_summary_and_outcomes():
     assert "oops" in text
 
 
+def test_format_text_default_omits_blocked_outcomes():
+    outcomes = [
+        _outcome(pattern_id="b1", status="blocked"),
+        _outcome(pattern_id="l1", status="leaked", verdict_reason="leaked!"),
+    ]
+    text = format_text(_result(outcomes))
+    assert "b1" not in text
+    assert "l1" in text
+    assert "leaked!" in text
+
+
+def test_format_text_verbose_includes_blocked_outcomes():
+    outcomes = [
+        _outcome(pattern_id="b1", status="blocked"),
+        _outcome(pattern_id="l1", status="leaked", verdict_reason="leaked!"),
+    ]
+    text = format_text(_result(outcomes), ReportOptions(verbose=True))
+    assert "b1" in text
+    assert "l1" in text
+
+
+def test_format_text_default_lists_leaked_and_error():
+    outcomes = [
+        _outcome(pattern_id="l1", status="leaked", verdict_reason="leaked!"),
+        _outcome(pattern_id="e1", status="error", error="boom"),
+    ]
+    text = format_text(_result(outcomes))
+    assert "l1" in text
+    assert "e1" in text
+    assert "boom" in text
+
+
+def test_format_text_category_breakdown():
+    outcomes = [
+        _outcome(pattern_id="a1", category="cat_a", status="blocked"),
+        _outcome(pattern_id="a2", category="cat_a", status="blocked"),
+        _outcome(pattern_id="a3", category="cat_a", status="leaked"),
+        _outcome(pattern_id="b1", category="cat_b", status="blocked"),
+        _outcome(pattern_id="b2", category="cat_b", status="error", error="boom"),
+    ]
+    text = format_text(_result(outcomes))
+    assert "by category:" in text
+    assert "cat_a" in text
+    assert "2/3 blocked" in text
+    assert "cat_b" in text
+    # cat_b has one blocked (scoreable) and one error, which must not be
+    # silently dropped from the score denominator's visibility.
+    assert "1/1 blocked" in text
+    assert "1 error" in text
+
+
+def test_format_text_all_blocked_is_short_and_clear():
+    outcomes = [
+        _outcome(pattern_id="a1", status="blocked"),
+        _outcome(pattern_id="a2", status="blocked"),
+    ]
+    text = format_text(_result(outcomes))
+    assert "all 2 attacks blocked" in text
+    assert "a1" not in text
+    assert "a2" not in text
+
+
 def test_format_text_verbose_includes_answer():
     outcomes = [_outcome(answer="the secret answer")]
     text_default = format_text(_result(outcomes), ReportOptions(verbose=False))
     text_verbose = format_text(_result(outcomes), ReportOptions(verbose=True))
     assert "the secret answer" not in text_default
     assert "the secret answer" in text_verbose
+
+
+def test_format_json_unaffected_by_text_report_changes():
+    """format_json/result_to_dict must stay byte-identical regardless of
+    verbose or category breakdown changes to format_text - the JSON shape
+    is frozen and category_counts is a text-report-only concern."""
+    outcomes = [
+        _outcome(pattern_id="a1", category="cat_a", status="blocked"),
+        _outcome(pattern_id="a2", category="cat_a", status="leaked"),
+        _outcome(pattern_id="b1", category="cat_b", status="error", error="boom"),
+    ]
+    result = _result(outcomes)
+    default_json = format_json(result, ReportOptions(verbose=False))
+    verbose_json = format_json(result, ReportOptions(verbose=True))
+    assert default_json == verbose_json
+    parsed = json.loads(default_json)
+    assert "category_counts" not in parsed
+    assert set(parsed.keys()) == {
+        "schema_version",
+        "raginject_version",
+        "started_at",
+        "target_description",
+        "pattern_count",
+        "score",
+        "counts",
+        "outcomes",
+    }
 
 
 def test_available_formatters_includes_builtins():
@@ -163,3 +252,82 @@ def test_max_answer_chars_none_disables_truncation():
     result = _result([_outcome(answer="x" * 50)])
     payload = json.loads(format_json(result, ReportOptions(max_answer_chars=None)))
     assert payload["outcomes"][0]["answer"] == "x" * 50
+
+
+def test_format_text_lists_every_failed_id_even_when_many():
+    """The `failed:` list is never truncated. When a gate fails these ids
+    are what the user acts on, and a CI log naming only the first few would
+    force a second, verbose run just to learn the rest."""
+    outcomes = [
+        _outcome(pattern_id=f"pattern-{i:03d}", status="leaked") for i in range(40)
+    ]
+    # One survivor, so this is a partial failure: the id list is what the
+    # user acts on, and the "everything failed" collapse must not kick in.
+    outcomes.append(_outcome(pattern_id="survivor", status="blocked"))
+    text = format_text(_result(outcomes))
+
+    for i in range(40):
+        assert f"pattern-{i:03d}" in text, f"pattern-{i:03d} missing from failed list"
+    assert "more (every id is listed above" in text  # details capped, ids not
+
+
+def test_format_text_failed_ids_wrap_instead_of_one_long_line():
+    outcomes = [
+        _outcome(pattern_id=f"a-very-long-pattern-id-{i:03d}", status="leaked")
+        for i in range(20)
+    ]
+    outcomes.append(_outcome(pattern_id="survivor", status="blocked"))
+    text = format_text(_result(outcomes))
+
+    failed_lines = [
+        line
+        for line in text.splitlines()
+        if line.startswith("failed: ") or line.startswith("        a-very-long")
+    ]
+    assert len(failed_lines) > 1, "expected the id list to wrap onto several lines"
+    assert all(len(line) <= 80 for line in failed_lines), (
+        "wrapped failed: lines must stay within a normal terminal width"
+    )
+
+
+def test_format_text_caps_detailed_outcomes_but_verbose_does_not():
+    outcomes = [
+        _outcome(pattern_id=f"p{i:03d}", status="leaked", verdict_reason=f"why-{i:03d}")
+        for i in range(25)
+    ]
+    outcomes.append(_outcome(pattern_id="survivor", status="blocked"))
+
+    default = format_text(_result(outcomes))
+    assert "why-000" in default
+    assert "why-024" not in default, "detail list should be capped by default"
+    assert "and 15 more" in default
+
+    verbose = format_text(_result(outcomes), ReportOptions(verbose=True))
+    assert "why-024" in verbose
+    assert "more (every id is listed above" not in verbose
+
+
+def test_format_text_no_cap_notice_when_few_outcomes():
+    outcomes = [_outcome(pattern_id="p1", status="leaked")]
+    text = format_text(_result(outcomes))
+    assert "more (every id is listed above" not in text
+
+
+def test_format_text_collapses_failed_ids_when_everything_leaked():
+    """When every scoreable pattern leaked, naming each id costs ~20 lines
+    and says nothing the per-category breakdown hasn't already said."""
+    outcomes = [_outcome(pattern_id=f"p{i:03d}", status="leaked") for i in range(30)]
+    text = format_text(_result(outcomes))
+    assert "failed: all 30 scoreable patterns" in text
+    assert "p029" not in text
+
+
+def test_format_text_lists_ids_when_only_some_leaked():
+    """A partial failure is the case where the ids are actually actionable,
+    so they must still be listed in full."""
+    outcomes = [_outcome(pattern_id=f"p{i:03d}", status="leaked") for i in range(30)]
+    outcomes.append(_outcome(pattern_id="survivor", status="blocked"))
+    text = format_text(_result(outcomes))
+    assert "failed: all" not in text
+    for i in range(30):
+        assert f"p{i:03d}" in text

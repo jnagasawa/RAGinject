@@ -4,13 +4,19 @@
 # Run this from the repo root with the dev venv present (`uv sync`).
 # Keep the two runs below in sync with README's demo section: this GIF is a
 # recording of real output, and re-recording it is how it stays true.
+#
+# Width/Height are sized to the *whole* default-set report (52 patterns is
+# ~48 lines plus the prompt and exit code). If the report format or the
+# pattern count changes, re-check that the score line at the top is still
+# on screen in the final frame - the terminal scrolls, so an output taller
+# than Height silently pushes the headline result out of the recording.
 
 Output docs/demo.gif
 
 Set Shell "bash"
-Set FontSize 15
-Set Width 1400
-Set Height 600
+Set FontSize 14
+Set Width 860
+Set Height 900
 Set Padding 18
 Set TypingSpeed 35ms
 Set Framerate 20
