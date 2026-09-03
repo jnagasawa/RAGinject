@@ -32,11 +32,6 @@ Show
 
 Sleep 2500ms
 
-Hide
-Type "clear" Enter
-Show
-Sleep 800ms
-
 # 1. A naive pipeline: the injected instructions reach the answer, and the
 #    --min-score gate fails the build.
 Type "raginject run --target-module raginject.demo:vulnerable_rag --min-score 0.8"
@@ -46,14 +41,12 @@ Sleep 3s
 Type "echo $?"
 Sleep 300ms
 Enter
-Sleep 2500ms
-
-Hide
-Type "clear" Enter
-Show
-Sleep 500ms
+Sleep 1500ms
 
 # 2. A pipeline that treats retrieved text as data, never as instructions.
+#    No `clear` here on purpose: the terminal just scrolls, like a real
+#    session, instead of jump-cutting to a second "scene" - that read as
+#    a looped replay rather than a second, different run.
 Type "raginject run --target-module raginject.demo:defended_rag --min-score 1.0"
 Sleep 500ms
 Enter
