@@ -60,8 +60,10 @@ wordmark stays in documentation, where none of that can bite.
   implement `src/raginject/judges/base.py`. New adapters implement
   `src/raginject/target.py`'s `Target`.
 - Add/update tests under `tests/` for any new behavior.
-- Non-invasive by design: don't add anything that requires users to modify
-  their own RAG pipeline code.
+- Ask as little of the user's pipeline as possible. Today the only thing
+  raginject requires is that a target accept a `context` argument (mode B's
+  injection channel). Don't add a second such requirement — no mandatory
+  callbacks, config files, or wrappers around their retriever.
 - `Target` implementations must be safe for concurrent `query()` calls. This
   isn't exercised in Milestone 1, but a future `--concurrency` option will
   call `query()` from multiple threads at once, and that must not require a
