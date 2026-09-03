@@ -20,7 +20,7 @@ def _write(tmp_path, name: str, content: str):
 
 def test_load_default_patterns():
     patterns = load_default_patterns()
-    assert len(patterns) == 5
+    assert len(patterns) >= 45
     ids = [p.id for p in patterns]
     assert ids == sorted(ids, key=ids.index)  # order preserved as authored
     assert "indirect-injection-basic-001" in ids
@@ -213,7 +213,7 @@ def test_filter_patterns_by_id_and_category():
 
     by_category = filter_patterns(patterns, categories=["data_exfiltration"])
     assert all(p.category == "data_exfiltration" for p in by_category)
-    assert len(by_category) == 2
+    assert len(by_category) >= 2
 
 
 def test_filter_patterns_treats_empty_selectors_as_no_filter():

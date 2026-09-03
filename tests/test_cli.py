@@ -117,7 +117,7 @@ def test_run_output_json_is_pure_json_on_stdout():
 
 
 def test_validate_default_patterns_ok():
-    result = _invoke("validate", "src/raginject/attacks/patterns/default.yaml")
+    result = _invoke("validate", "src/raginject/attacks/patterns")
     assert result.exit_code == 0
     assert "ok" in result.stdout
 
@@ -231,6 +231,7 @@ def test_plugin_module_in_cwd_is_importable(tmp_path, monkeypatch):
             "--no-default-patterns",
             "--min-score",
             "1.0",
+            "--verbose",
         ],
     )
     assert result.exit_code == 0, result.output

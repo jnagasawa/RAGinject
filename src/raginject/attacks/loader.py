@@ -1,4 +1,4 @@
-"""Load and merge attack patterns from YAML (see PLAN.md 5.3)."""
+"""Load and merge attack patterns from YAML."""
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from ..errors import PatternError
 from .schema import AttackPattern
 
-DEFAULT_PATTERNS_PATH = Path(__file__).parent / "patterns" / "default.yaml"
+DEFAULT_PATTERNS_PATH = Path(__file__).parent / "patterns"
 
 
 def _format_validation_error(
@@ -97,7 +97,7 @@ def iter_pattern_files(path: Union[str, Path]) -> List[Path]:
 
 def _merge(patterns: Sequence[AttackPattern]) -> List[AttackPattern]:
     """Later entries override earlier ones with the same id, but keep the
-    position of the id's first occurrence (see PLAN.md 5.3 / decision C)."""
+    position of the id's first occurrence."""
     merged: Dict[str, AttackPattern] = {}
     for pattern in patterns:
         merged[pattern.id] = pattern
@@ -105,8 +105,13 @@ def _merge(patterns: Sequence[AttackPattern]) -> List[AttackPattern]:
 
 
 def load_default_patterns() -> List[AttackPattern]:
-    """Load the built-in default pattern set."""
-    return _load_file(DEFAULT_PATTERNS_PATH)
+    """Load the built-in default pattern set (all `*.yaml`/`*.yml` files
+    directly inside `patterns/`, merged in sorted-filename order)."""
+    files = iter_pattern_files(DEFAULT_PATTERNS_PATH)
+    all_patterns: List[AttackPattern] = []
+    for file_path in files:
+        all_patterns.extend(_load_file(file_path))
+    return _merge(all_patterns)
 
 
 def load_patterns(path: Optional[Union[str, Path]] = None) -> List[AttackPattern]:
