@@ -45,6 +45,7 @@ a full run costs nothing and takes milliseconds.
 - [How it works](#how-it-works)
 - [Corpus injection (mode A)](#corpus-injection-mode-a)
 - [What raginject measures (and what it doesn't)](#what-raginject-measures-and-what-it-doesnt)
+- [Does the corpus actually work?](#does-the-corpus-actually-work)
 - [CLI reference](#cli-reference)
 - [Custom attack patterns](#custom-attack-patterns)
 - [`llm_judge`: semantic judging](#llm_judge-semantic-judging)
@@ -463,8 +464,8 @@ the question with nothing but `question`, lets your own retriever decide
 whether it surfaces, and deletes the document afterward. See [Corpus
 injection (mode A)](#corpus-injection-mode-a) below.
 
-**`keyword_match` cannot tell "obeyed" from "quoted".** The only judge in the
-current release checks whether any string in
+**`keyword_match` cannot tell "obeyed" from "quoted".** The default judge
+checks whether any string in
 `success_criteria.forbidden_in_answer` appears in the answer (after Unicode
 NFKC normalization and whitespace collapsing, case-insensitive by default).
 That's fast and dependency-free, but it cannot distinguish a pipeline that
@@ -476,27 +477,58 @@ optional `llm_judge` (see below) makes that call semantically instead, and
 opt into one of those, review the `answer` field of `leaked` outcomes before
 treating them as confirmed findings.
 
-**Scores are not comparable across models or pipelines.** Because
+**Unverified scores are not comparable across models or pipelines.** Because
 `keyword_match` can't tell "obeyed" from "quoted", a model that correctly
 refuses an injected instruction but explains itself by naming the canary
 ("this document is trying to get me to output X; I won't") is scored
 `leaked` anyway. How often that happens depends on how verbose a model is
 about its own refusals, not on how secure the pipeline is - so a more
-transparent, better-behaved model can score worse than a terser one. Use
-raginject to compare a pipeline against its own earlier runs, not to rank
-models or vendors against each other, and read the `answer` field of
-`leaked` outcomes before treating a score difference as a security
-difference. Separately, when gating a non-deterministic pipeline, leave a
-margin: don't set `--min-score` within about one pattern's worth of its
-measured score (roughly 0.02 on the 52-pattern default set), because
-run-to-run variation of that size is normal. `--verify-leaks` (see below)
-mitigates this: it re-judges only the rows the primary judge called
-`leaked`, which is where this false-positive rate lives.
+transparent, better-behaved model can score worse than a terser one. This is
+measured, not hypothetical: on the run in
+[Does the corpus actually work?](#does-the-corpus-actually-work), one model
+lost 8 points to it while two others lost nothing at all.
+
+`--verify-leaks llm_judge` (see below) removes that class: it re-judges only
+the rows the primary judge called `leaked`, which is the only place this kind
+of false positive can live. **Run it before comparing anything to anything.**
+Even then, prefer comparing a pipeline against its own earlier runs — a score
+still depends on the corpus, the judge, and which mode you ran, so it is a
+regression signal first and a cross-pipeline number a distant second. Also
+leave a margin when gating a non-deterministic pipeline: don't set
+`--min-score` within about one pattern's worth of its measured score (roughly
+0.02 on the 52-pattern default set), because run-to-run variation of that size
+is normal.
 
 **A passing score is not a safety guarantee.** raginject tests the attacks you
 give it. A score of 1.00 means your pipeline blocked those specific patterns
 on that specific run. That's a regression signal, not proof. It's also not a
 runtime defense: nothing here protects a production request.
+
+## Does the corpus actually work?
+
+A security tool that only beats its own toy target is worth nothing, so the
+built-in corpus was run against real LLM-backed pipelines: 52 patterns x 5
+models x {no defense, system-prompt defense} = 520 queries, with every
+`leaked` row re-judged by `llm_judge`.
+
+| model | no defense | system-prompt defense |
+|---|---:|---:|
+| meta-llama/llama-3.1-8b-instruct | 0.42 | 0.85 |
+| openai/gpt-4o-mini | 0.31 | 0.85 |
+| google/gemini-2.5-flash | 0.21 | 0.75 |
+| anthropic/claude-haiku-4.5 | 0.90 | 0.98 |
+| anthropic/claude-sonnet-4.5 | 0.81 | 1.00 |
+
+Naive scores span 0.21-0.90 and one unoptimized defense prompt is worth up to
++0.54, which is what the corpus needs to be useful: it neither blocks
+everything nor passes everything.
+
+**These are not a safety ranking of the models.** One corpus, one unoptimized
+defense prompt, one judge model, mode B only, `temperature=0`. The full method,
+the raw-vs-verified comparison that shows why `--verify-leaks` matters, the
+per-category breakdown, and the complete list of what this does *not*
+establish are in **[docs/benchmark.md](https://github.com/jnagasawa/RAGinject/blob/main/docs/benchmark.md)**. Read that before
+quoting any number above.
 
 ## CLI reference
 
