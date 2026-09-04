@@ -17,7 +17,10 @@ jobs:
       # (it must be importable from the repo root; raginject adds the
       # current working directory to sys.path for you). This step uses the
       # dependency-free demo target so the workflow is runnable as-is - see
-      # `raginject.demo` in README.md.
+      # `raginject.demo` in README.md. For the full real-target recipe -
+      # installing your app, secrets, a JSON artifact, and optional
+      # llm_judge verification - see
+      # `example_ci_github_actions_real_target.yml`.
       - run: |
           raginject run \
             --target-module raginject.demo:defended_rag \

@@ -1,0 +1,99 @@
+name: raginject security regression
+
+on: [pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  raginject:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Two separate installs on purpose: your own app, then raginject.
+      - run: pip install -e .
+      # `llm-judge` is an extra on raginject, not on your own package. It's
+      # only needed for the optional --verify-leaks step below; plain
+      # `pip install raginject` is enough without it.
+      - run: pip install 'raginject[llm-judge]'
+
+      # One step, one run of the target. A separate "verify" step would
+      # query the target a second time - double the cost and runtime, and
+      # on a non-deterministic pipeline it would produce two different
+      # scores for the same commit.
+      - name: Run raginject
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # Optional, and on only if you set the OPENAI_API_KEY secret:
+          # keyword_match can't tell a pipeline that obeyed an injected
+          # instruction from one that correctly refused but named the
+          # canary while explaining itself, so an unverified score reads
+          # lower than the pipeline deserves, by an amount that depends on
+          # the model. --verify-leaks re-judges only the rows marked
+          # "leaked". It makes API calls and costs money.
+          verify_flags=""
+          if [ -n "$OPENAI_API_KEY" ]; then
+            verify_flags="--verify-leaks llm_judge --judge-model gpt-4o-mini"
+          fi
+
+          # --target-module takes module:attribute and must be importable
+          # from the repository root; raginject adds the current working
+          # directory to sys.path. This is mode B: raginject hands
+          # documents to your target through a `context` argument, so
+          # answer_question must accept it, e.g.
+          #   def answer_question(question, context=None)
+          # If your entry point only takes `question`, use
+          # --corpus-injector module:attribute instead (mode A, which
+          # injects into your real corpus) - see README.md.
+          #
+          # Alternative for an HTTP target instead of a Python import:
+          #   --target-url https://staging.example.internal/api/rag \
+          #   --header "Authorization: Bearer $RAG_TOKEN"
+          # with RAG_TOKEN coming from a repository secret.
+          #
+          # --patterns adds to (not replaces) the 52 built-in patterns; add
+          # --no-default-patterns to run only your own. The patterns worth
+          # writing are the ones that use your own canaries. The path below
+          # is a placeholder - drop the line if you have no pattern files of
+          # your own, because a --patterns path that doesn't exist aborts
+          # the run.
+          #
+          # --min-score is a placeholder: measure your pipeline first, then
+          # gate slightly below the measured score. Leave about 0.02 of
+          # margin on the 52-pattern default set (one pattern's worth) -
+          # run-to-run variation of that size is normal on a
+          # non-deterministic pipeline. --min-score has no default on
+          # purpose: without it, the run does not gate and exits 0.
+          raginject run \
+            --target-module myapp.rag:answer_question \
+            --patterns ./attack_patterns/ \
+            $verify_flags \
+            --output json \
+            --min-score 0.80 \
+            > raginject-report.json
+
+      - name: Write summary
+        if: always()
+        run: |
+          if [ -f raginject-report.json ]; then
+            score=$(jq -r '.score' raginject-report.json)
+            pattern_count=$(jq -r '.pattern_count' raginject-report.json)
+            blocked=$(jq -r '.counts.blocked' raginject-report.json)
+            leaked=$(jq -r '.counts.leaked' raginject-report.json)
+            error=$(jq -r '.counts.error' raginject-report.json)
+            echo "raginject: score $score over $pattern_count patterns (blocked=$blocked leaked=$leaked error=$error)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # always() matters here precisely because the run step above fails
+      # the job on a below-threshold score - that's exactly when you want
+      # the report.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: raginject-report
+          path: raginject-report.json

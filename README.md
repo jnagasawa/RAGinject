@@ -309,10 +309,14 @@ jobs:
             --min-score 0.8
 ```
 
-A runnable copy (pointed at the demo target) is in
-[`examples/example_ci_github_actions.yml`](examples/example_ci_github_actions.yml).
-Use `--output json > report.json` plus `actions/upload-artifact` if you want
-the full report attached to the run.
+Two runnable copies are in `examples/`:
+[`example_ci_github_actions.yml`](examples/example_ci_github_actions.yml)
+runs as-is against the demo target, for seeing the shape work before wiring
+your own, and
+[`example_ci_github_actions_real_target.yml`](examples/example_ci_github_actions_real_target.yml)
+is the real-target recipe - installing your app, secrets, `--output json`
+uploaded as an artifact with `actions/upload-artifact`, and optional
+`--verify-leaks llm_judge` verification.
 
 ## How it works
 
