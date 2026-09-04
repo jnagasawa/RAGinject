@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from raginject import __version__
 from raginject.baseline import check_comparable, compare, load_baseline
 from raginject.core import AttackOutcome, Result
 from raginject.errors import ConfigurationError
@@ -32,7 +33,10 @@ def _result(outcomes) -> Result:
     return Result(
         outcomes=outcomes,
         started_at="2026-01-01T00:00:00+00:00",
-        raginject_version="0.5.0",
+        # The running version, not a literal: check_comparable warns on a
+        # version mismatch, so a hardcoded version here would turn every
+        # release's version bump into a spurious test failure.
+        raginject_version=__version__,
         target_description="FunctionTarget(demo)",
         pattern_count=len(outcomes),
     )

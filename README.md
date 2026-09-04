@@ -150,7 +150,7 @@ failed: all 52 scoreable patterns (see the breakdown above)
 
 ... and 42 more (every id is listed above; run with --verbose for all details)
 
-warning: --min-score not set; this run does not gate (exit 0 regardless of score)
+warning: neither --min-score nor --max-drop is set; this run does not gate (exit 0 regardless of score)
 ```
 
 The defended one passes its gate:
