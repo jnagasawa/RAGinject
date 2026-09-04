@@ -47,6 +47,7 @@ a full run costs nothing and takes milliseconds.
 - [What raginject measures (and what it doesn't)](#what-raginject-measures-and-what-it-doesnt)
 - [Does the corpus actually work?](#does-the-corpus-actually-work)
 - [CLI reference](#cli-reference)
+- [Catching regressions](#catching-regressions)
 - [Custom attack patterns](#custom-attack-patterns)
 - [`llm_judge`: semantic judging](#llm_judge-semantic-judging)
 - [Custom judges and formatters](#custom-judges-and-formatters)
@@ -501,7 +502,10 @@ regression signal first and a cross-pipeline number a distant second. Also
 leave a margin when gating a non-deterministic pipeline: don't set
 `--min-score` within about one pattern's worth of its measured score (roughly
 0.02 on the 52-pattern default set), because run-to-run variation of that size
-is normal.
+is normal. That figure was measured with `keyword_match` at `temperature=0`;
+run-to-run variance with `llm_judge` in the loop has not been measured. The
+same margin applies to `--max-drop` when gating against a
+[baseline](#catching-regressions) instead of a fixed number.
 
 **A passing score is not a safety guarantee.** raginject tests the attacks you
 give it. A score of 1.00 means your pipeline blocked those specific patterns
@@ -569,6 +573,8 @@ quoting any number above.
 | `--judge-base-url` | none | OpenAI-compatible endpoint, e.g. an OpenRouter URL (`llm_judge` only) |
 | `--corpus-injector` | none | `module:attribute` `CorpusInjector` spec; enables corpus injection (mode A) |
 | `--no-verify-retrieval` | off | Don't error rows whose injected document wasn't in the target's `sources` (mode A only) |
+| `--baseline` | none | Path to a JSON report from an earlier run, to compare this run against (see [Catching regressions](#catching-regressions)) |
+| `--max-drop` | none | Fail (exit `1`) if the score drops below `baseline score - this`. Requires `--baseline` |
 
 `--target-module` and the HTTP-specific flags are mutually exclusive;
 combining them is a configuration error (exit `2`) rather than a silently
@@ -586,16 +592,69 @@ on the command line.
 
 | Code | Meaning |
 |---|---|
-| `0` | Score ≥ `--min-score`, **or** `--min-score` was not given at all (a warning goes to stderr in that case, since the run does not gate) |
-| `1` | `--min-score` was given and the score is below it |
-| `2` | Any configuration error (bad flags, unknown judge, zero patterns loaded, invalid pattern file, ...); **or** every attack errored (zero scoreable outcomes, meaning the target was never successfully reached, so returning `1` would misreport a connectivity failure as a security failure); or an unexpected crash (set `RAGINJECT_DEBUG=1` for a traceback instead of the one-line message) |
+| `0` | Every gate that was requested (`--min-score` and/or `--max-drop`) passed, **or** neither was given at all (a warning goes to stderr in that case, since the run does not gate) |
+| `1` | `--min-score` was given and the score is below it, **or** `--max-drop` was given and the baseline comparison regressed |
+| `2` | Any configuration error (bad flags, unknown judge, zero patterns loaded, invalid pattern file, a `--baseline` that doesn't parse or doesn't match this run's pattern set/mode, ...); **or** every attack errored (zero scoreable outcomes, meaning the target was never successfully reached, so returning `1` would misreport a connectivity failure as a security failure); or an unexpected crash (set `RAGINJECT_DEBUG=1` for a traceback instead of the one-line message) |
 
 `--min-score` has no default on purpose: a CI job that forgets to set it does
-not silently gate on score `0.0`; it warns on stderr and exits `0`.
+not silently gate on score `0.0`; it warns on stderr and exits `0`. The same
+is true of `--max-drop` - a run given neither flag never gates.
 
 With `--output json`, stdout is pure JSON (warnings and errors go to stderr),
 so it pipes safely. The payload carries a `schema_version`, top-level `score`
-and `counts`, and one entry per attack, stable enough to diff between runs.
+and `counts`, and one entry per attack - stable enough to diff between runs,
+which is exactly what [Catching regressions](#catching-regressions) below
+does for you.
+
+## Catching regressions
+
+`--min-score` gates against a fixed number you set once. `--baseline` gates
+against a report from an earlier run instead, so the check moves with your
+corpus and your pipeline rather than a number you have to remember to
+update. No new file format: a baseline is just a report saved earlier with
+`--output json`.
+
+**1. Record a baseline**, e.g. on `main` after a change you trust:
+
+```bash
+raginject run --target-module myapp.rag:answer_question \
+  --output json > baseline.json
+```
+
+**2. Inspect a later run against it** with `--baseline` alone - this never
+gates (exit `0` no matter how far the score has moved), it just adds a
+`baseline: score X -> Y (...)` section to the report, naming which pattern
+ids newly leaked (`new leaks:`), which ones got fixed (`fixed:`), and which
+ones started erroring (`new errors:`):
+
+```bash
+raginject run --target-module myapp.rag:answer_question \
+  --baseline baseline.json
+```
+
+**3. Gate on it** with `--max-drop`, once you know what a normal run looks
+like:
+
+```bash
+raginject run --target-module myapp.rag:answer_question \
+  --baseline baseline.json --max-drop 0.02
+```
+
+This fails (exit `1`) only when the score drops by more than `0.02` below
+the baseline's score - a drop of exactly `0.02` still passes. As with
+`--min-score`, leave a margin: on the 52-pattern default set, roughly `0.02`
+is one pattern's worth of score, and that figure was measured with
+`keyword_match` at `temperature=0` - run-to-run variance with `llm_judge` in
+the loop has not been measured, so a gate set tighter than your own observed
+spread will flag noise as a regression, not a real one.
+
+A `--baseline` whose pattern set or mode doesn't match this run's is a
+configuration error (exit `2`), checked **before any query is sent** - a
+corpus upgrade or a `--patterns` change both require re-recording the
+baseline, and raginject would rather abort for free than spend API calls
+comparing two different measurements. A version or target mismatch is a
+softer signal (a warning on stderr, not an abort) since either can be
+legitimate.
 
 ## Custom attack patterns
 

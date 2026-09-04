@@ -8,16 +8,20 @@ consume a dict directly instead of re-parsing JSON text.
 
 import json
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from .core import AttackOutcome, Result
 from .errors import ConfigurationError
 
+if TYPE_CHECKING:
+    from .baseline import BaselineComparison
+
 #: Schema version stamped into JSON reports, so future regression detection
 #: can tell which report format it is comparing against. v2 added the
 #: top-level "mode" ("a"/"b") and "corpus_injector_description" keys when
-#: corpus injection (mode A) was implemented.
-REPORT_SCHEMA_VERSION = 2
+#: corpus injection (mode A) was implemented. v3 added the top-level
+#: "baseline" key (null unless a --baseline comparison was made).
+REPORT_SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -27,6 +31,12 @@ class ReportOptions:
     #: system prompt would otherwise land in one.
     max_answer_chars: Optional[int] = 2000
     verbose: bool = False
+    #: Set when the CLI was given --baseline; carries the comparison so the
+    #: formatter can render it. `TYPE_CHECKING`-only import: `baseline.py`
+    #: imports `REPORT_SCHEMA_VERSION` from this module lazily (inside a
+    #: function) precisely so this module can reference `BaselineComparison`
+    #: for a type hint without a real circular import at runtime.
+    baseline_comparison: Optional["BaselineComparison"] = None
 
 
 def _truncate_answer(answer: str, options: ReportOptions):
@@ -60,6 +70,22 @@ def result_to_dict(result: Result, options: "ReportOptions" = None) -> Dict[str,
     if options is None:
         options = ReportOptions()
 
+    comparison = options.baseline_comparison
+    baseline_dict = (
+        None
+        if comparison is None
+        else {
+            "score": comparison.baseline_score,
+            "started_at": comparison.baseline_started_at,
+            "score_delta": comparison.score_delta,
+            "max_drop": comparison.max_drop,
+            "regressed": comparison.regressed,
+            "new_leaks": comparison.new_leaks,
+            "fixed": comparison.fixed,
+            "new_errors": comparison.new_errors,
+        }
+    )
+
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "raginject_version": result.raginject_version,
@@ -76,6 +102,7 @@ def result_to_dict(result: Result, options: "ReportOptions" = None) -> Dict[str,
             "scored": result.scored_count,
         },
         "outcomes": [_outcome_to_dict(o, options) for o in result.outcomes],
+        "baseline": baseline_dict,
     }
 
 
@@ -120,19 +147,19 @@ _FAILED_IDS_WRAP_WIDTH = 78
 _MAX_DETAILED_OUTCOMES = 10
 
 
-def _wrap_failed_ids(failed_ids: List[str]) -> List[str]:
-    """Render the complete `failed:` id list, wrapped and indented.
+def _wrap_id_list(ids: List[str], *, prefix: str) -> List[str]:
+    """Render a complete id list under `prefix`, wrapped and indented.
 
-    Not truncated: when a gate fails, these ids are what the user acts on,
-    and a CI log that names only the first few forces a second, verbose run
-    to learn the rest.
+    Not truncated: these ids (a failing gate's `failed:` list, or a
+    baseline comparison's `new leaks:`/`fixed:`/`new errors:` lines) are
+    what the user acts on, and a CI log that names only the first few
+    forces a second, verbose run to learn the rest.
     """
-    prefix = "failed: "
     indent = " " * len(prefix)
     lines: List[str] = []
     current = prefix
-    for index, pattern_id in enumerate(failed_ids):
-        piece = pattern_id + ("," if index < len(failed_ids) - 1 else "")
+    for index, pattern_id in enumerate(ids):
+        piece = pattern_id + ("," if index < len(ids) - 1 else "")
         if current not in (prefix, indent) and (
             len(current) + 1 + len(piece) > _FAILED_IDS_WRAP_WIDTH
         ):
@@ -142,6 +169,10 @@ def _wrap_failed_ids(failed_ids: List[str]) -> List[str]:
             current = current + (" " if current.endswith(",") else "") + piece
     lines.append(current)
     return lines
+
+
+def _wrap_failed_ids(failed_ids: List[str]) -> List[str]:
+    return _wrap_id_list(failed_ids, prefix="failed: ")
 
 
 @register_formatter("text")
@@ -202,33 +233,55 @@ def format_text(result: Result, options: "ReportOptions" = None) -> str:
     if not outcomes_to_list:
         lines.append("")
         lines.append(f"all {result.scored_count} attacks blocked.")
-        return "\n".join(lines).rstrip() + "\n"
+    else:
+        hidden = 0
+        if not options.verbose and len(outcomes_to_list) > _MAX_DETAILED_OUTCOMES:
+            hidden = len(outcomes_to_list) - _MAX_DETAILED_OUTCOMES
+            outcomes_to_list = outcomes_to_list[:_MAX_DETAILED_OUTCOMES]
 
-    hidden = 0
-    if not options.verbose and len(outcomes_to_list) > _MAX_DETAILED_OUTCOMES:
-        hidden = len(outcomes_to_list) - _MAX_DETAILED_OUTCOMES
-        outcomes_to_list = outcomes_to_list[:_MAX_DETAILED_OUTCOMES]
-
-    lines.append("")
-    for outcome in outcomes_to_list:
-        answer, truncated = _truncate_answer(outcome.answer, options)
-        lines.append(
-            f"[{outcome.status.upper()}] {outcome.pattern_id} ({outcome.category})"
-        )
-        if outcome.status == "error":
-            lines.append(f"  error: {outcome.error}")
-        else:
-            lines.append(f"  reason: {outcome.verdict_reason}")
-            if options.verbose:
-                suffix = " (truncated)" if truncated else ""
-                lines.append(f"  answer{suffix}: {answer}")
         lines.append("")
+        for outcome in outcomes_to_list:
+            answer, truncated = _truncate_answer(outcome.answer, options)
+            lines.append(
+                f"[{outcome.status.upper()}] {outcome.pattern_id} ({outcome.category})"
+            )
+            if outcome.status == "error":
+                lines.append(f"  error: {outcome.error}")
+            else:
+                lines.append(f"  reason: {outcome.verdict_reason}")
+                if options.verbose:
+                    suffix = " (truncated)" if truncated else ""
+                    lines.append(f"  answer{suffix}: {answer}")
+            lines.append("")
 
-    if hidden:
+        if hidden:
+            lines.append(
+                f"... and {hidden} more (every id is listed above; "
+                f"run with --verbose for all details)"
+            )
+
+    comparison = options.baseline_comparison
+    if comparison is not None:
+        lines.append("")
+        if comparison.max_drop is None:
+            drop_note = "no --max-drop: not gating"
+        else:
+            # `:g`, not the `:.2f` used for scores: max_drop is a threshold
+            # the user typed, and rounding `--max-drop 0.005` to "0.01" in
+            # the report would misreport why a gate did or didn't fire.
+            drop_note = f"max-drop {comparison.max_drop:g}"
+        status_suffix = " REGRESSED" if comparison.regressed else ""
         lines.append(
-            f"... and {hidden} more (every id is listed above; "
-            f"run with --verbose for all details)"
+            f"baseline: score {comparison.baseline_score:.2f} -> "
+            f"{comparison.score:.2f} ({comparison.score_delta:+.2f}, "
+            f"{drop_note}){status_suffix}"
         )
+        if comparison.new_leaks:
+            lines.extend(_wrap_id_list(comparison.new_leaks, prefix="  new leaks: "))
+        if comparison.fixed:
+            lines.extend(_wrap_id_list(comparison.fixed, prefix="  fixed:     "))
+        if comparison.new_errors:
+            lines.extend(_wrap_id_list(comparison.new_errors, prefix="  new errors: "))
 
     return "\n".join(lines).rstrip() + "\n"
 

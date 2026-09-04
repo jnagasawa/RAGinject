@@ -1,5 +1,6 @@
 """CLI tests: exit-code paths, --min-score warning, JSON stdout purity,
-validate, list-patterns, and --plugin judge registration."""
+validate, list-patterns, --plugin judge registration, and
+--baseline/--max-drop regression gating."""
 
 import json
 
@@ -33,7 +34,7 @@ def _invoke(*args):
 def test_run_vulnerable_demo_no_min_score_exits_0_with_warning():
     result = _invoke("run", "--target-module", "raginject.demo:vulnerable_rag")
     assert result.exit_code == 0
-    assert "not set" in result.stderr
+    assert "--min-score" in result.stderr
     assert "does not gate" in result.stderr
 
 
@@ -111,7 +112,7 @@ def test_run_output_json_is_pure_json_on_stdout():
     )
     # stdout must be pure JSON - no warnings/errors mixed in.
     parsed = json.loads(result.stdout)
-    assert parsed["schema_version"] == 2
+    assert parsed["schema_version"] == 3
     # the "no gate" warning goes to stderr, not stdout.
     assert "warning" in result.stderr
 
@@ -307,3 +308,197 @@ def test_judge_model_flag_without_llm_judge_is_configuration_error():
     )
     assert result.exit_code == 2
     assert "llm_judge" in result.stderr
+
+
+# --- baseline / --max-drop -------------------------------------------------
+
+
+def _record_baseline(
+    tmp_path, target_module="raginject.demo:defended_rag", name="baseline.json"
+):
+    """Run `target_module` once and save its JSON report to `tmp_path/name`,
+    the same way a user would with `--output json > baseline.json`."""
+    result = _make_runner().invoke(
+        main,
+        ["run", "--target-module", target_module, "--output", "json"],
+    )
+    assert result.exit_code == 0, result.output
+    path = tmp_path / name
+    path.write_text(result.stdout, encoding="utf-8")
+    return path
+
+
+def test_max_drop_without_baseline_is_configuration_error():
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:defended_rag",
+        "--max-drop",
+        "0.1",
+    )
+    assert result.exit_code == 2
+    assert "--baseline" in result.stderr
+
+
+def test_negative_max_drop_is_configuration_error(tmp_path):
+    baseline_path = _record_baseline(tmp_path)
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:defended_rag",
+        "--baseline",
+        str(baseline_path),
+        "--max-drop",
+        "-0.1",
+    )
+    assert result.exit_code == 2
+
+
+def test_missing_baseline_path_is_configuration_error(tmp_path):
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:defended_rag",
+        "--baseline",
+        str(tmp_path / "no-such-file.json"),
+    )
+    assert result.exit_code == 2
+    assert "does not exist" in result.stderr
+
+
+def test_baseline_alone_exits_0_even_on_a_big_drop(tmp_path):
+    baseline_path = _record_baseline(
+        tmp_path, target_module="raginject.demo:defended_rag"
+    )
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:vulnerable_rag",
+        "--baseline",
+        str(baseline_path),
+    )
+    assert result.exit_code == 0, result.output
+    assert "baseline:" in result.output
+
+
+def test_baseline_and_max_drop_exits_1_on_a_drop(tmp_path):
+    baseline_path = _record_baseline(
+        tmp_path, target_module="raginject.demo:defended_rag"
+    )
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:vulnerable_rag",
+        "--baseline",
+        str(baseline_path),
+        "--max-drop",
+        "0.02",
+    )
+    assert result.exit_code == 1, result.output
+    assert "REGRESSED" in result.output
+
+
+def test_baseline_json_output_reports_regression(tmp_path):
+    baseline_path = _record_baseline(
+        tmp_path, target_module="raginject.demo:defended_rag"
+    )
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:vulnerable_rag",
+        "--baseline",
+        str(baseline_path),
+        "--max-drop",
+        "0.02",
+        "--output",
+        "json",
+    )
+    assert result.exit_code == 1, result.output
+    parsed = json.loads(result.stdout)
+    assert parsed["schema_version"] == 3
+    assert parsed["baseline"]["regressed"] is True
+    assert parsed["baseline"]["score_delta"] < 0
+
+
+def test_mismatched_pattern_set_baseline_exits_2(tmp_path):
+    baseline_path = _record_baseline(tmp_path)
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:defended_rag",
+        "--baseline",
+        str(baseline_path),
+        "--no-default-patterns",
+        "--patterns",
+        "src/raginject/attacks/patterns/01_instruction_override.yaml",
+    )
+    assert result.exit_code == 2
+    assert "does not match" in result.stderr
+
+
+def test_mismatched_pattern_set_baseline_sends_zero_queries(tmp_path, monkeypatch):
+    baseline_path = _record_baseline(tmp_path)
+
+    calls_file = tmp_path / "calls.txt"
+    target_module = tmp_path / "counting_target.py"
+    target_module.write_text(
+        "import pathlib\n"
+        f"CALLS_FILE = pathlib.Path({str(calls_file)!r})\n"
+        "\n"
+        "def answer(question, context=None):\n"
+        "    with CALLS_FILE.open('a') as f:\n"
+        "        f.write('call\\n')\n"
+        "    return {'answer': 'ok', 'sources': []}\n",
+        encoding="utf-8",
+    )
+    pattern_file = tmp_path / "one_pattern.yaml"
+    pattern_file.write_text(
+        "- id: only-pattern\n"
+        "  category: custom\n"
+        "  description: d\n"
+        "  injected_content: 'note: \"canary-value\"'\n"
+        "  question: q\n"
+        "  success_criteria:\n"
+        "    type: keyword_match\n"
+        "    forbidden_in_answer: ['canary-value']\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    result = _make_runner().invoke(
+        main,
+        [
+            "run",
+            "--target-module",
+            "counting_target:answer",
+            "--baseline",
+            str(baseline_path),
+            "--no-default-patterns",
+            "--patterns",
+            "one_pattern.yaml",
+        ],
+    )
+    assert result.exit_code == 2
+    # Proven by the absence of any recorded call, not by timing.
+    assert not calls_file.exists()
+
+
+def test_baseline_mode_mismatch_is_configuration_error(tmp_path):
+    baseline_path = _record_baseline(tmp_path)
+    data = json.loads(baseline_path.read_text(encoding="utf-8"))
+    data["mode"] = "a"
+    baseline_path.write_text(json.dumps(data), encoding="utf-8")
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:defended_rag",
+        "--baseline",
+        str(baseline_path),
+    )
+    assert result.exit_code == 2
+    assert "mode" in result.stderr
+
+
+def test_neither_min_score_nor_max_drop_warns_no_gate():
+    result = _invoke("run", "--target-module", "raginject.demo:defended_rag")
+    assert result.exit_code == 0
+    assert "does not gate" in result.stderr

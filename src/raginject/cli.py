@@ -1,16 +1,19 @@
 """CLI entry point: thin wrapper over core.py.
 
 Exit codes:
-- 0: score >= --min-score, OR --min-score was not given at all (a warning
-     is printed to stderr in that case: no gate is in effect)
-- 1: --min-score was given AND the score is below it. This is the only
-     path to exit 1.
-- 2: any ConfigurationError (bad flags, unknown judge, zero patterns, ...),
-     OR zero scoreable outcomes (every row errored - the target was never
-     reached, so returning 1 would misreport connectivity failure as a
-     security failure: reporting a run that never reached the target as a
-     security failure would be misleading), OR an unexpected exception (set
-     RAGINJECT_DEBUG=1 to see the traceback instead).
+- 0: an explicitly requested gate (--min-score and/or --max-drop) passed,
+     OR neither gate was given at all (a warning is printed to stderr in
+     that case: no gate is in effect)
+- 1: --min-score was given and the score is below it, OR --max-drop was
+     given and the baseline comparison regressed. This is the only path to
+     exit 1.
+- 2: any ConfigurationError (bad flags, unknown judge, zero patterns,
+     a --baseline that doesn't parse or doesn't match this run's pattern
+     set/mode, ...), OR zero scoreable outcomes (every row errored - the
+     target was never reached, so returning 1 would misreport connectivity
+     failure as a security failure: reporting a run that never reached the
+     target as a security failure would be misleading), OR an unexpected
+     exception (set RAGINJECT_DEBUG=1 to see the traceback instead).
 """
 
 import importlib
@@ -22,6 +25,7 @@ import click
 
 from ._version import __version__
 from .attacks.loader import load_default_patterns, load_patterns
+from .baseline import check_comparable, compare, load_baseline
 from .core import Runner
 from .errors import ConfigurationError, RagInjectError
 from .report import ReportOptions, available_formatters, get_formatter
@@ -236,6 +240,19 @@ def _apply_plugins(plugin: Tuple[str, ...]) -> None:
     help="don't error rows whose injected document wasn't in the target's sources "
     "(mode A only)",
 )
+@click.option(
+    "--baseline",
+    default=None,
+    type=click.Path(),
+    help="path to a JSON report from an earlier run, to compare this run against",
+)
+@click.option(
+    "--max-drop",
+    default=None,
+    type=float,
+    help="fail (exit 1) if the score drops below (baseline score - this) - "
+    "requires --baseline",
+)
 def run(
     target_module,
     target_url,
@@ -260,12 +277,15 @@ def run(
     judge_base_url,
     corpus_injector,
     no_verify_retrieval,
+    baseline,
+    max_drop,
 ):
     """Run attack patterns against a target and report the result.
 
-    Exit codes: 0 = passed (score >= --min-score, or no --min-score given);
-    1 = score below --min-score; 2 = configuration error, target never
-    reached, or an unexpected crash.
+    Exit codes: 0 = every requested gate passed (--min-score and/or
+    --max-drop), or neither was given; 1 = --min-score not met or
+    --max-drop's regression check failed; 2 = configuration error, target
+    never reached, or an unexpected crash.
     """
     # Assigned once the target/injector are resolved and Runner() is
     # constructed - stays None if setup itself fails, so the except
@@ -327,6 +347,23 @@ def run(
                 "pass --corpus-injector to enable mode A"
             )
 
+        if max_drop is not None and baseline is None:
+            # Same "never silently ignore a flag" rule as
+            # --no-verify-retrieval above: a --max-drop with nothing to
+            # compare against would otherwise just be dropped on the floor.
+            raise ConfigurationError(
+                "--max-drop requires --baseline (there is nothing to compare "
+                "the drop against)"
+            )
+        if max_drop is not None and max_drop < 0:
+            raise ConfigurationError(f"--max-drop must be >= 0, got {max_drop!r}")
+
+        # Loaded before the target is built (and thus before the user's
+        # module is imported / any query is sent): a bad --baseline path
+        # should fail fast, not after paying the cost of standing up the
+        # target.
+        baseline_report = load_baseline(baseline) if baseline is not None else None
+
         target = _build_target(
             target_module=target_module,
             target_url=target_url,
@@ -353,6 +390,22 @@ def run(
             verify_retrieval=not no_verify_retrieval,
         )
         _load_all_patterns(runner, patterns, no_default_patterns)
+
+        if baseline_report is not None:
+            # Comparability is checked before a single query is sent: a
+            # mismatched baseline (different pattern set or mode) means
+            # the two runs aren't measuring the same thing, and finding
+            # that out only makes sense before spending real API money on
+            # a run() that will be thrown away.
+            comparability_warnings = check_comparable(
+                baseline_report,
+                pattern_ids=[p.id for p in runner.patterns],
+                mode=runner.mode,
+                target_description=target.target_description,
+            )
+            for warning_message in comparability_warnings:
+                click.echo(warning_message, err=True)
+
         try:
             result = runner.run()
         finally:
@@ -360,7 +413,17 @@ def run(
             if callable(closer):
                 closer()
 
-        options = ReportOptions(max_answer_chars=max_answer_chars, verbose=verbose)
+        comparison = (
+            compare(result, baseline_report, max_drop=max_drop)
+            if baseline_report is not None
+            else None
+        )
+
+        options = ReportOptions(
+            max_answer_chars=max_answer_chars,
+            verbose=verbose,
+            baseline_comparison=comparison,
+        )
         rendered = formatter(result, options)
         click.echo(rendered)
 
@@ -374,15 +437,17 @@ def run(
             )
             sys.exit(2)
 
-        if min_score is None:
+        if min_score is None and max_drop is None:
             click.echo(
-                "warning: --min-score not set; this run does not gate (exit 0 "
-                "regardless of score)",
+                "warning: neither --min-score nor --max-drop is set; this run "
+                "does not gate (exit 0 regardless of score)",
                 err=True,
             )
             sys.exit(0)
 
-        sys.exit(0 if result.score >= min_score else 1)
+        min_score_failed = min_score is not None and result.score < min_score
+        regressed = comparison is not None and comparison.regressed
+        sys.exit(1 if (min_score_failed or regressed) else 0)
 
     except ConfigurationError as exc:
         _warn_uncleaned_documents(runner)

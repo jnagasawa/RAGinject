@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from raginject.baseline import BaselineComparison
 from raginject.core import AttackOutcome, Result
 from raginject.errors import ConfigurationError
 from raginject.report import (
@@ -49,7 +50,7 @@ def _result(outcomes) -> Result:
 def test_result_to_dict_schema_version():
     result = _result([_outcome()])
     d = result_to_dict(result)
-    assert d["schema_version"] == REPORT_SCHEMA_VERSION == 2
+    assert d["schema_version"] == REPORT_SCHEMA_VERSION == 3
 
 
 def test_result_to_dict_counts():
@@ -101,6 +102,7 @@ def test_json_report_has_no_secret_fields():
         "score",
         "counts",
         "outcomes",
+        "baseline",
     }
 
 
@@ -216,6 +218,7 @@ def test_format_json_unaffected_by_text_report_changes():
         "score",
         "counts",
         "outcomes",
+        "baseline",
     }
 
 
@@ -335,3 +338,105 @@ def test_format_text_lists_ids_when_only_some_leaked():
     assert "failed: all" not in text
     for i in range(30):
         assert f"p{i:03d}" in text
+
+
+def test_format_text_baseline_section_with_max_drop():
+    outcomes = [_outcome(pattern_id="a1", status="blocked")]
+    comparison = BaselineComparison(
+        baseline_score=0.88,
+        baseline_started_at="2026-01-01T00:00:00+00:00",
+        score=0.85,
+        score_delta=-0.03,
+        new_leaks=["obfuscation-002", "multilingual-004"],
+        fixed=["indirect-injection-006"],
+        new_errors=[],
+        max_drop=0.02,
+        regressed=True,
+    )
+    text = format_text(_result(outcomes), ReportOptions(baseline_comparison=comparison))
+    assert "baseline: score 0.88 -> 0.85 (-0.03, max-drop 0.02) REGRESSED" in text
+    assert "obfuscation-002" in text
+    assert "multilingual-004" in text
+    assert "indirect-injection-006" in text
+    # No new_errors, so that line must not appear.
+    assert "new errors:" not in text
+
+
+def test_format_text_baseline_section_without_max_drop():
+    outcomes = [_outcome(pattern_id="a1", status="blocked")]
+    comparison = BaselineComparison(
+        baseline_score=0.88,
+        baseline_started_at=None,
+        score=0.85,
+        score_delta=-0.03,
+        new_leaks=[],
+        fixed=[],
+        new_errors=[],
+        max_drop=None,
+        regressed=False,
+    )
+    text = format_text(_result(outcomes), ReportOptions(baseline_comparison=comparison))
+    assert "no --max-drop: not gating" in text
+    assert "REGRESSED" not in text
+    assert "new leaks:" not in text
+    assert "fixed:" not in text
+
+
+def test_format_text_no_baseline_section_when_not_compared():
+    outcomes = [_outcome(pattern_id="a1", status="blocked")]
+    text = format_text(_result(outcomes))
+    assert "baseline:" not in text
+
+
+def test_result_to_dict_baseline_none_by_default():
+    d = result_to_dict(_result([_outcome()]))
+    assert d["baseline"] is None
+
+
+def test_result_to_dict_baseline_present_when_compared():
+    comparison = BaselineComparison(
+        baseline_score=0.88,
+        baseline_started_at="2026-01-01T00:00:00+00:00",
+        score=0.85,
+        score_delta=-0.03,
+        new_leaks=["a1"],
+        fixed=[],
+        new_errors=[],
+        max_drop=0.02,
+        regressed=True,
+    )
+    d = result_to_dict(
+        _result([_outcome()]), ReportOptions(baseline_comparison=comparison)
+    )
+    assert d["baseline"] == {
+        "score": 0.88,
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "score_delta": -0.03,
+        "max_drop": 0.02,
+        "regressed": True,
+        "new_leaks": ["a1"],
+        "fixed": [],
+        "new_errors": [],
+    }
+
+
+def test_format_text_baseline_max_drop_is_not_rounded():
+    """A threshold the user typed is printed as typed. Rendering it with
+    the scores' `.2f` would show `--max-drop 0.005` as "0.01" and misreport
+    why the gate did or didn't fire."""
+    comparison = BaselineComparison(
+        baseline_score=1.0,
+        baseline_started_at=None,
+        score=0.99,
+        score_delta=-0.01,
+        new_leaks=[],
+        fixed=[],
+        new_errors=[],
+        max_drop=0.005,
+        regressed=True,
+    )
+    text = format_text(
+        _result([_outcome(pattern_id="a1", status="blocked")]),
+        ReportOptions(baseline_comparison=comparison),
+    )
+    assert "max-drop 0.005" in text

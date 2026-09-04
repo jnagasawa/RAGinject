@@ -69,6 +69,16 @@ jobs:
           # run-to-run variation of that size is normal on a
           # non-deterministic pipeline. --min-score has no default on
           # purpose: without it, the run does not gate and exits 0.
+          #
+          # Alternative/addition: gate against a baseline instead of (or as
+          # well as) a fixed number. Commit a report recorded on `main` -
+          # e.g. `raginject run ... --output json > baseline.json` - then
+          # pass it here with --baseline baseline.json --max-drop 0.02. A
+          # baseline's pattern set and mode must match this run's exactly
+          # (checked before any query is sent, so a mismatch costs nothing);
+          # re-record it whenever --patterns changes or raginject itself is
+          # upgraded (either can change the built-in corpus). See README.md's
+          # "Catching regressions" section.
           raginject run \
             --target-module myapp.rag:answer_question \
             --patterns ./attack_patterns/ \
