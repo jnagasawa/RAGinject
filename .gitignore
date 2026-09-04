@@ -1,7 +1,7 @@
 # Internal design docs, deliberately kept out of the repo
 /PLAN.md
 /ROADMAP.md
-/CLAUDE.md
+/CLAUDE.md*
 /CHANGELOG.md
 
 __pycache__/
@@ -17,3 +17,4 @@ htmlcov/
 .venv/
 .env
 /bench/
+.claude/
