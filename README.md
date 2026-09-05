@@ -12,6 +12,7 @@
 [![PyPI](https://img.shields.io/pypi/v/raginject.svg)](https://pypi.org/project/raginject/)
 [![Python](https://img.shields.io/pypi/pyversions/raginject.svg)](https://pypi.org/project/raginject/)
 [![CI](https://github.com/jnagasawa/RAGinject/actions/workflows/ci.yml/badge.svg)](https://github.com/jnagasawa/RAGinject/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/jnagasawa/RAGinject/branch/main/graph/badge.svg)](https://codecov.io/gh/jnagasawa/RAGinject)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **Does your RAG pipeline obey instructions hidden inside the documents it
