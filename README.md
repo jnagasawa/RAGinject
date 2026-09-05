@@ -563,10 +563,11 @@ quoting any number above.
 | `--patterns` | none | Pattern file or directory, repeatable |
 | `--no-default-patterns` | off | Skip the built-in pattern set |
 | `--plugin` | none | Module to import (registers judges/formatters), repeatable |
-| `--output` | `text` | `text`, `json`, or a registered formatter |
+| `--output` | `text` | `text`, `json`, `markdown`, `html`, or a registered formatter |
 | `--max-answer-chars` | `2000` | Truncate answers in reports (`0` disables) |
 | `--min-score` | none | Fail (exit `1`) below this score. **No default: no gate unless set** |
 | `--verbose` | off | Include answers in the text report |
+| `--color` / `--no-color` | auto | Colorize `text`-report status labels. Default: on for a real terminal, off otherwise or when `NO_COLOR` is set |
 | `--judge` | none | Judge name overriding every pattern's `success_criteria.type` |
 | `--verify-leaks` | none | Judge name used to re-judge only the rows the primary judge marked `leaked` |
 | `--judge-model` | none | Model name (`llm_judge` only) |
@@ -811,7 +812,11 @@ raginject run --target-module myapp.rag:my_rag --plugin my_judges \
 ```
 
 Report formatters follow the identical pattern with `@register_formatter` (see
-`src/raginject/report.py`); `--plugin` can register either. From the Python API you
+`src/raginject/report.py`); `--plugin` can register either. The four built-ins are
+`text`, `json`, `markdown`, and `html` - `markdown`/`html` mirror `text` section for
+section (same content, same verbose/cap gating) as plain, log-like output rather than
+a dashboard: `markdown` uses headers/bold/`code` spans/fenced blocks, `html` is a
+single self-contained file with inline CSS and no external resources. From the Python API you
 can also pass judge instances directly: `Runner(target, judges={"my_judge":
 MyJudge(...)})` takes priority over the registry, which is handy for injecting a
 pre-configured or fake judge in tests.

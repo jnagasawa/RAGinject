@@ -23,7 +23,7 @@ from .judges import (
     get_judge,
     register_judge,
 )
-from .report import format_json, format_text
+from .report import format_html, format_json, format_markdown, format_text
 from .target import QueryResult, Target
 
 __all__ = [
@@ -51,7 +51,9 @@ __all__ = [
     "Verdict",
     "__version__",
     "available_judges",
+    "format_html",
     "format_json",
+    "format_markdown",
     "format_text",
     "get_judge",
     "load_patterns",

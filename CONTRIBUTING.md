@@ -241,6 +241,11 @@ def format_your_format(result, options=None) -> str:
 A built-in formatter is registered by importing its module from
 `src/raginject/report.py`; a third-party one is loaded the same way as a
 third-party judge, via `raginject run --output your_format --plugin your_package.your_formatter`.
+The four built-ins are `text`, `json`, `markdown`, and `html`. Any formatter that
+emits markup (HTML in particular) must escape every free-form field it interpolates
+- `answer`, `verdict_reason`, `error`, `target_description`, and friends are
+prompt-injection payloads and raw model output, not trusted strings - `format_html`'s
+use of stdlib `html.escape()` is the precedent to follow.
 
 ## Issues / PRs
 

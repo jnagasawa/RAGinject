@@ -6,7 +6,7 @@ import json
 
 from click.testing import CliRunner
 
-from raginject.cli import main
+from raginject.cli import _resolve_color, main
 from raginject.judges import available_judges
 
 
@@ -502,3 +502,60 @@ def test_neither_min_score_nor_max_drop_warns_no_gate():
     result = _invoke("run", "--target-module", "raginject.demo:defended_rag")
     assert result.exit_code == 0
     assert "does not gate" in result.stderr
+
+
+# --- --color/--no-color resolution ---------------------------------------
+#
+# CliRunner's captured stdout is not a real TTY (confirmed above in
+# _make_runner()), so with no flag and no NO_COLOR, isatty() is False and no
+# ANSI should appear either way. These tests exercise the *other* paths:
+# an explicit flag, and NO_COLOR, including that an explicit --color still
+# wins over NO_COLOR and that an empty NO_COLOR does not disable.
+
+
+def test_no_flag_no_env_produces_no_ansi():
+    result = _invoke("run", "--target-module", "raginject.demo:vulnerable_rag")
+    assert "\x1b[" not in result.stdout
+
+
+def test_color_flag_forces_ansi_even_though_cli_runner_is_not_a_tty():
+    result = _invoke(
+        "run", "--target-module", "raginject.demo:vulnerable_rag", "--color"
+    )
+    assert "\x1b[" in result.stdout
+
+
+def test_no_color_flag_forces_no_ansi():
+    result = _invoke(
+        "run", "--target-module", "raginject.demo:vulnerable_rag", "--no-color"
+    )
+    assert "\x1b[" not in result.stdout
+
+
+def test_no_color_env_disables_by_default():
+    result = _make_runner().invoke(
+        main,
+        ["run", "--target-module", "raginject.demo:vulnerable_rag"],
+        env={"NO_COLOR": "1"},
+    )
+    assert "\x1b[" not in result.stdout
+
+
+def test_explicit_color_flag_overrides_no_color_env():
+    result = _make_runner().invoke(
+        main,
+        ["run", "--target-module", "raginject.demo:vulnerable_rag", "--color"],
+        env={"NO_COLOR": "1"},
+    )
+    assert "\x1b[" in result.stdout
+
+
+def test_empty_no_color_env_does_not_disable(monkeypatch):
+    # CliRunner's stdout is never a real TTY, so an empty NO_COLOR and no
+    # --color flag is indistinguishable end-to-end from a genuinely unset
+    # NO_COLOR (both auto-detect to no color) - this exercises the
+    # resolution logic directly, with is_tty forced True, to prove an
+    # empty string is treated as unset rather than as "disable".
+    monkeypatch.setenv("NO_COLOR", "")
+    assert _resolve_color(None, is_tty=True) is True
+    assert _resolve_color(None, is_tty=False) is False

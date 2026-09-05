@@ -11,8 +11,11 @@ from raginject.errors import ConfigurationError
 from raginject.report import (
     REPORT_SCHEMA_VERSION,
     ReportOptions,
+    _fence_for,
     available_formatters,
+    format_html,
     format_json,
+    format_markdown,
     format_text,
     get_formatter,
     register_formatter,
@@ -440,3 +443,332 @@ def test_format_text_baseline_max_drop_is_not_rounded():
         ReportOptions(baseline_comparison=comparison),
     )
     assert "max-drop 0.005" in text
+
+
+# --- color -------------------------------------------------------------
+
+
+def test_report_options_color_defaults_false():
+    assert ReportOptions().color is False
+
+
+def test_format_text_color_false_has_no_ansi():
+    outcomes = [
+        _outcome(pattern_id="l1", status="leaked"),
+        _outcome(pattern_id="e1", status="error", error="boom"),
+        _outcome(pattern_id="b1", status="blocked"),
+    ]
+    text = format_text(_result(outcomes), ReportOptions(verbose=True, color=False))
+    assert "\x1b" not in text
+
+
+def test_format_text_color_true_wraps_status_labels():
+    outcomes = [
+        _outcome(pattern_id="l1", status="leaked"),
+        _outcome(pattern_id="e1", status="error", error="boom"),
+        _outcome(pattern_id="b1", status="blocked"),
+    ]
+    text = format_text(_result(outcomes), ReportOptions(verbose=True, color=True))
+    assert "\x1b[31m[LEAKED]\x1b[0m" in text
+    assert "\x1b[33m[ERROR]\x1b[0m" in text
+    assert "\x1b[32m[BLOCKED]\x1b[0m" in text
+
+
+def test_format_text_color_true_wraps_regressed():
+    comparison = BaselineComparison(
+        baseline_score=0.88,
+        baseline_started_at=None,
+        score=0.85,
+        score_delta=-0.03,
+        new_leaks=[],
+        fixed=[],
+        new_errors=[],
+        max_drop=0.02,
+        regressed=True,
+    )
+    text = format_text(
+        _result([_outcome(pattern_id="a1", status="blocked")]),
+        ReportOptions(baseline_comparison=comparison, color=True),
+    )
+    assert " \x1b[31mREGRESSED\x1b[0m" in text
+
+
+def test_format_json_unaffected_by_color_option():
+    outcomes = [_outcome(pattern_id="l1", status="leaked")]
+    result = _result(outcomes)
+    plain = format_json(result, ReportOptions(color=False))
+    colored = format_json(result, ReportOptions(color=True))
+    assert plain == colored
+    assert "\x1b" not in colored
+
+
+# --- markdown ------------------------------------------------------------
+
+
+def test_markdown_registered_in_available_formatters():
+    assert "markdown" in available_formatters()
+
+
+def test_format_markdown_includes_summary_and_outcomes():
+    outcomes = [_outcome(pattern_id="p1", status="leaked", verdict_reason="oops")]
+    text = format_markdown(_result(outcomes))
+    assert "# raginject report" in text
+    assert "`p1`" in text
+    assert "**LEAKED**" in text
+    assert "oops" in text
+
+
+def test_format_markdown_default_omits_blocked_outcomes():
+    outcomes = [
+        _outcome(pattern_id="b1", status="blocked"),
+        _outcome(pattern_id="l1", status="leaked", verdict_reason="leaked!"),
+    ]
+    text = format_markdown(_result(outcomes))
+    assert "`b1`" not in text
+    assert "`l1`" in text
+
+
+def test_format_markdown_verbose_includes_blocked_outcomes():
+    outcomes = [
+        _outcome(pattern_id="b1", status="blocked"),
+        _outcome(pattern_id="l1", status="leaked", verdict_reason="leaked!"),
+    ]
+    text = format_markdown(_result(outcomes), ReportOptions(verbose=True))
+    assert "`b1`" in text
+    assert "`l1`" in text
+
+
+def test_format_markdown_category_breakdown():
+    outcomes = [
+        _outcome(pattern_id="a1", category="cat_a", status="blocked"),
+        _outcome(pattern_id="a2", category="cat_a", status="leaked"),
+        _outcome(pattern_id="b1", category="cat_b", status="error", error="boom"),
+    ]
+    text = format_markdown(_result(outcomes))
+    assert "## By category" in text
+    assert "`cat_a`" in text
+    assert "1/2 blocked" in text
+    assert "`cat_b`" in text
+    assert "1 error" in text
+
+
+def test_format_markdown_caps_detailed_outcomes_but_verbose_does_not():
+    outcomes = [
+        _outcome(pattern_id=f"p{i:03d}", status="leaked", verdict_reason=f"why-{i:03d}")
+        for i in range(25)
+    ]
+    outcomes.append(_outcome(pattern_id="survivor", status="blocked"))
+
+    default = format_markdown(_result(outcomes))
+    assert "why-000" in default
+    assert "why-024" not in default
+    assert "and 15 more" in default
+
+    verbose = format_markdown(_result(outcomes), ReportOptions(verbose=True))
+    assert "why-024" in verbose
+    assert "more (every id is listed above" not in verbose
+
+
+def test_format_markdown_collapses_failed_ids_when_everything_leaked():
+    outcomes = [_outcome(pattern_id=f"p{i:03d}", status="leaked") for i in range(30)]
+    text = format_markdown(_result(outcomes))
+    assert "failed: all 30 scoreable patterns" in text
+    assert "`p029`" not in text
+
+
+def test_format_markdown_lists_ids_when_only_some_leaked():
+    outcomes = [_outcome(pattern_id=f"p{i:03d}", status="leaked") for i in range(30)]
+    outcomes.append(_outcome(pattern_id="survivor", status="blocked"))
+    text = format_markdown(_result(outcomes))
+    assert "failed: all" not in text
+    for i in range(30):
+        assert f"`p{i:03d}`" in text
+
+
+def test_format_markdown_baseline_section():
+    outcomes = [_outcome(pattern_id="a1", status="blocked")]
+    comparison = BaselineComparison(
+        baseline_score=0.88,
+        baseline_started_at="2026-01-01T00:00:00+00:00",
+        score=0.85,
+        score_delta=-0.03,
+        new_leaks=["obfuscation-002"],
+        fixed=["indirect-injection-006"],
+        new_errors=[],
+        max_drop=0.02,
+        regressed=True,
+    )
+    text = format_markdown(
+        _result(outcomes), ReportOptions(baseline_comparison=comparison)
+    )
+    assert "## Baseline" in text
+    assert "**REGRESSED**" in text
+    assert "`obfuscation-002`" in text
+    assert "`indirect-injection-006`" in text
+    assert "new errors:" not in text
+
+
+def test_format_markdown_error_outcome_renders_inside_fenced_block():
+    outcomes = [_outcome(pattern_id="e1", status="error", error="boom")]
+    text = format_markdown(_result(outcomes))
+    assert "````\nboom\n````" in text
+
+
+def test_fence_for_no_backticks_uses_floor_of_four():
+    assert _fence_for("plain content") == "````"
+
+
+def test_fence_for_widens_past_backtick_collision():
+    content = "here is ``` a fence"
+    fence = _fence_for(content)
+    assert fence == "````"
+    assert fence not in content
+
+
+def test_fence_for_widens_further_for_longer_runs():
+    content = "````` five backticks"
+    fence = _fence_for(content)
+    assert len(fence) == 6
+    assert fence not in content
+
+
+# --- html ------------------------------------------------------------
+
+
+def test_html_registered_in_available_formatters():
+    assert "html" in available_formatters()
+
+
+def test_format_html_is_self_contained_document():
+    outcomes = [_outcome(pattern_id="p1", status="leaked")]
+    text = format_html(_result(outcomes))
+    assert text.startswith("<!DOCTYPE html>")
+    assert "<style>" in text
+    assert "<script" not in text
+    assert "<link" not in text
+
+
+def test_format_html_tolerates_none_target_description_and_started_at():
+    # Result.target_description/started_at are Optional[str] - a
+    # directly-constructed Result (not run through Runner) can leave them
+    # None, and format_text/format_json already tolerate that. format_html
+    # must too, rather than crashing inside html.escape(None).
+    result = Result(outcomes=[])
+    text = format_html(result)
+    assert "None" in text
+
+
+def test_format_html_escapes_malicious_answer():
+    outcomes = [
+        _outcome(
+            pattern_id="p1",
+            status="leaked",
+            answer="<script>alert(1)</script>",
+        )
+    ]
+    text = format_html(_result(outcomes), ReportOptions(verbose=True))
+    assert "<script>alert(1)</script>" not in text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
+
+
+def test_format_html_escapes_verdict_reason_error_and_target_description():
+    outcomes = [
+        _outcome(
+            pattern_id="p1",
+            status="leaked",
+            verdict_reason='<img src=x onerror="alert(1)">',
+        ),
+        _outcome(pattern_id="p2", status="error", error="<b>boom</b>"),
+    ]
+    result = Result(
+        outcomes=outcomes,
+        started_at="2026-01-01T00:00:00+00:00",
+        raginject_version="0.2.0",
+        target_description="<script>steal()</script>",
+        pattern_count=len(outcomes),
+    )
+    text = format_html(result)
+    assert "<img src=x onerror" not in text
+    assert "&lt;img src=x onerror" in text
+    assert "<b>boom</b>" not in text
+    assert "&lt;b&gt;boom&lt;/b&gt;" in text
+    assert "<script>steal()</script>" not in text
+    assert "&lt;script&gt;steal()&lt;/script&gt;" in text
+
+
+def test_format_html_status_css_classes_present():
+    outcomes = [
+        _outcome(pattern_id="l1", status="leaked"),
+        _outcome(pattern_id="e1", status="error", error="boom"),
+        _outcome(pattern_id="b1", status="blocked"),
+    ]
+    text = format_html(_result(outcomes), ReportOptions(verbose=True))
+    assert 'class="status leaked"' in text
+    assert 'class="status error"' in text
+    assert 'class="status blocked"' in text
+
+
+def test_format_html_regressed_class_on_regressed_baseline():
+    comparison = BaselineComparison(
+        baseline_score=0.88,
+        baseline_started_at=None,
+        score=0.85,
+        score_delta=-0.03,
+        new_leaks=[],
+        fixed=[],
+        new_errors=[],
+        max_drop=0.02,
+        regressed=True,
+    )
+    text = format_html(
+        _result([_outcome(pattern_id="a1", status="blocked")]),
+        ReportOptions(baseline_comparison=comparison),
+    )
+    assert 'class="regressed"' in text
+
+
+def test_format_html_not_regressed_has_no_regressed_class():
+    comparison = BaselineComparison(
+        baseline_score=0.88,
+        baseline_started_at=None,
+        score=0.90,
+        score_delta=0.02,
+        new_leaks=[],
+        fixed=[],
+        new_errors=[],
+        max_drop=0.02,
+        regressed=False,
+    )
+    text = format_html(
+        _result([_outcome(pattern_id="a1", status="blocked")]),
+        ReportOptions(baseline_comparison=comparison),
+    )
+    assert 'class="regressed"' not in text
+
+
+def test_format_html_default_omits_blocked_verbose_includes():
+    outcomes = [
+        _outcome(pattern_id="b1", status="blocked"),
+        _outcome(pattern_id="l1", status="leaked"),
+    ]
+    default = format_html(_result(outcomes))
+    assert ">b1<" not in default and "b1</code>" not in default
+    verbose = format_html(_result(outcomes), ReportOptions(verbose=True))
+    assert "b1</code>" in verbose
+
+
+def test_format_html_caps_detailed_outcomes_but_verbose_does_not():
+    outcomes = [
+        _outcome(pattern_id=f"p{i:03d}", status="leaked", verdict_reason=f"why-{i:03d}")
+        for i in range(25)
+    ]
+    outcomes.append(_outcome(pattern_id="survivor", status="blocked"))
+
+    default = format_html(_result(outcomes))
+    assert "why-000" in default
+    assert "why-024" not in default
+    assert "and 15 more" in default
+
+    verbose = format_html(_result(outcomes), ReportOptions(verbose=True))
+    assert "why-024" in verbose
+    assert "more (every id is listed above" not in verbose

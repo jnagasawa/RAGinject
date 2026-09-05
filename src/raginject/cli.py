@@ -196,6 +196,20 @@ def _apply_plugins(plugin: Tuple[str, ...]) -> None:
             ) from exc
 
 
+def _resolve_color(explicit: Optional[bool], is_tty: bool) -> bool:
+    """Resolve the tri-state --color/--no-color flag to a bool.
+
+    An explicit flag always wins. Otherwise NO_COLOR (any non-empty value,
+    per https://no-color.org - an empty string does NOT count) disables
+    color; failing that, auto-detect a real terminal.
+    """
+    if explicit is not None:
+        return explicit
+    if os.environ.get("NO_COLOR"):
+        return False
+    return is_tty
+
+
 @main.command()
 @click.option("--target-module", default=None, help="module:attribute target spec")
 @click.option("--target-url", default=None, help="HTTP endpoint URL")
@@ -213,6 +227,12 @@ def _apply_plugins(plugin: Tuple[str, ...]) -> None:
 @click.option("--max-answer-chars", default=2000, show_default=True, type=int)
 @click.option("--min-score", default=None, type=float)
 @click.option("--verbose", is_flag=True, default=False)
+@click.option(
+    "--color/--no-color",
+    default=None,
+    help="colorize text-report status labels; default: auto (on for a TTY, "
+    "off otherwise or when NO_COLOR is set)",
+)
 @click.option(
     "--judge", default=None, help="judge name overriding every pattern's judge"
 )
@@ -270,6 +290,7 @@ def run(
     max_answer_chars,
     min_score,
     verbose,
+    color,
     judge,
     verify_leaks,
     judge_model,
@@ -419,13 +440,21 @@ def run(
             else None
         )
 
+        color_resolved = _resolve_color(color, sys.stdout.isatty())
+
         options = ReportOptions(
             max_answer_chars=max_answer_chars,
             verbose=verbose,
             baseline_comparison=comparison,
+            color=color_resolved,
         )
         rendered = formatter(result, options)
-        click.echo(rendered)
+        # click.echo() strips ANSI codes itself when it thinks the
+        # destination isn't a real terminal (e.g. piped output, or
+        # CliRunner's captured stream in tests) unless told not to -
+        # color_resolved already encodes the right answer, so pass it
+        # straight through rather than let click re-detect and disagree.
+        click.echo(rendered, color=color_resolved)
 
         _warn_uncleaned_documents(runner)
 
