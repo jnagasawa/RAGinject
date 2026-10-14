@@ -449,3 +449,97 @@ def test_llm_judge_parse_error_does_not_embed_the_whole_response():
     message = str(excinfo.value)
     assert len(message) < 400
     assert "truncated" in message
+
+
+# --- retrieval_match -----------------------------------------------------
+
+
+def _retrieval_pattern() -> AttackPattern:
+    return AttackPattern(
+        id="r1",
+        category="retriever_poisoning",
+        description="d",
+        injected_content="keyword stuffed document",
+        question="what is the expense policy?",
+        success_criteria=SuccessCriteria(type="retrieval_match"),
+    )
+
+
+def _retrieval_ctx(sources, document_id="raginject-r1") -> JudgeContext:
+    return JudgeContext(
+        pattern=_retrieval_pattern(),
+        question="what is the expense policy?",
+        answer="whatever the target answered",
+        sources=sources,
+        document_id=document_id,
+    )
+
+
+def test_registry_has_retrieval_match_immediately_after_import():
+    # Same eager-import guard as keyword_match: retrieval_match has no
+    # optional dependency, so it must not be lazily imported.
+    assert "retrieval_match" in available_judges()
+
+
+def test_get_judge_returns_retrieval_match_instance():
+    from raginject.judges.retrieval import RetrievalMatchJudge
+
+    judge = get_judge("retrieval_match")
+    assert isinstance(judge, RetrievalMatchJudge)
+
+
+def test_retrieval_match_scores_retrieval_class_attribute_is_true():
+    from raginject.judges.retrieval import RetrievalMatchJudge
+
+    assert RetrievalMatchJudge.scores_retrieval is True
+
+
+def test_retrieval_match_exact_id_in_sources_succeeds():
+    from raginject.judges.retrieval import RetrievalMatchJudge
+
+    judge = RetrievalMatchJudge()
+    verdict = judge.judge(_retrieval_ctx(["raginject-r1"]))
+    assert verdict.attack_succeeded is True
+    assert "raginject-r1" in verdict.reason
+
+
+def test_retrieval_match_substring_source_succeeds():
+    from raginject.judges.retrieval import RetrievalMatchJudge
+
+    judge = RetrievalMatchJudge()
+    assert judge.judge(_retrieval_ctx(["raginject-r1.txt"])).attack_succeeded is True
+    assert (
+        judge.judge(_retrieval_ctx(["/corpus/raginject-r1"])).attack_succeeded is True
+    )
+
+
+def test_retrieval_match_unrelated_sources_do_not_succeed():
+    from raginject.judges.retrieval import RetrievalMatchJudge
+
+    judge = RetrievalMatchJudge()
+    verdict = judge.judge(_retrieval_ctx(["some-other-doc.txt"]))
+    assert verdict.attack_succeeded is False
+
+
+def test_retrieval_match_empty_sources_do_not_succeed():
+    from raginject.judges.retrieval import RetrievalMatchJudge
+
+    judge = RetrievalMatchJudge()
+    verdict = judge.judge(_retrieval_ctx([]))
+    assert verdict.attack_succeeded is False
+
+
+def test_retrieval_match_validate_criteria_rejects_forbidden_in_answer():
+    from raginject.judges.retrieval import RetrievalMatchJudge
+
+    criteria = SuccessCriteria(type="retrieval_match", forbidden_in_answer=["SECRET"])
+    with pytest.raises(ConfigurationError, match="forbidden_in_answer"):
+        RetrievalMatchJudge.validate_criteria(criteria)
+
+
+def test_retrieval_match_validate_criteria_accepts_no_forbidden_in_answer():
+    from raginject.judges.retrieval import RetrievalMatchJudge
+
+    RetrievalMatchJudge.validate_criteria(
+        _retrieval_pattern().success_criteria
+    )  # must not raise

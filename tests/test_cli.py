@@ -559,3 +559,61 @@ def test_empty_no_color_env_does_not_disable(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "")
     assert _resolve_color(None, is_tty=True) is True
     assert _resolve_color(None, is_tty=False) is False
+
+
+# --- --pattern-set ---------------------------------------------------------
+
+
+def test_pattern_set_retriever_runs_against_mode_a_demo_target():
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:vulnerable_corpus_rag",
+        "--corpus-injector",
+        "raginject.demo:demo_corpus_injector",
+        "--no-default-patterns",
+        "--pattern-set",
+        "retriever",
+    )
+    # The demo retriever returns everything with no ranking (Stage 3 gives
+    # it real ranking), so this just asserts the set actually ran and
+    # produced scoreable outcomes - not a specific score.
+    assert result.exit_code == 0
+    assert "retriever-poisoning-001" in result.stdout
+
+
+def test_pattern_set_unknown_name_exits_2():
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:vulnerable_rag",
+        "--pattern-set",
+        "nope",
+    )
+    assert result.exit_code == 2
+    assert "nope" in result.stderr
+    assert "retriever" in result.stderr
+
+
+def test_pattern_set_retriever_mode_b_exits_2():
+    """Stage 1's preflight: a retrieval_match pattern in mode B (no
+    --corpus-injector) is a configuration error, not a runnable/blocked
+    pattern - there is no injected document id to check sources against."""
+    result = _invoke(
+        "run",
+        "--target-module",
+        "raginject.demo:vulnerable_rag",
+        "--no-default-patterns",
+        "--pattern-set",
+        "retriever",
+    )
+    assert result.exit_code == 2
+
+
+def test_list_patterns_pattern_set_retriever():
+    result = _invoke(
+        "list-patterns", "--no-default-patterns", "--pattern-set", "retriever"
+    )
+    assert result.exit_code == 0
+    assert "retriever-poisoning-001" in result.stdout
+    assert "retrieval_match" in result.stdout

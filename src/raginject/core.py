@@ -25,7 +25,7 @@ from typing import (
 from ._version import __version__
 from .attacks.loader import load_patterns as _load_patterns
 from .attacks.schema import AttackPattern
-from .corpus import CorpusInjector
+from .corpus import CorpusInjector, source_matches_document
 from .errors import ConfigurationError, TargetError
 from .judges import Judge, JudgeContext, get_judge
 from .target import Target
@@ -152,7 +152,10 @@ class Runner:
     instead. `verify_leaks_judge`, if given, re-judges only the rows the
     primary judge marked "leaked" (never "blocked" ones, since that is
     where a judge's false positives live) and can flip a leaked row to
-    blocked; see `run()` for the exact semantics.
+    blocked; see `run()` for the exact semantics. It does not apply to rows
+    judged by a retrieval-scoring judge, whose verdict comes from `sources`
+    rather than from answer text and so has no answer-based false positive
+    to correct.
 
     `corpus_injector`, if given, switches the runner into **mode A**: each
     attack document is written into the user's real retrieval corpus via
@@ -220,6 +223,7 @@ class Runner:
         judge: Judge,
         *,
         context: Optional[List[str]],
+        document_id: Optional[str] = None,
     ) -> AttackOutcome:
         """Query the target once for `pattern` and judge the answer,
         returning a single AttackOutcome.
@@ -229,7 +233,10 @@ class Runner:
         attack document handed straight to the target); mode A calls it
         with `context=None` after writing the document into the corpus via
         `corpus_injector.inject`, so the target's own retriever decides
-        whether it surfaces.
+        whether it surfaces. `document_id` is the id that document was
+        injected under (mode A only; `None` in mode B) - it is threaded into
+        `JudgeContext` so a retrieval-scoring judge (e.g. `retrieval_match`)
+        can check whether it came back in `sources`.
 
         A `ConfigurationError` raised by the target or a judge always
         propagates (it aborts the whole run - see `run()`'s docstring).
@@ -280,6 +287,7 @@ class Runner:
                     question=pattern.question,
                     answer=answer,
                     sources=sources,
+                    document_id=document_id,
                 )
             )
             status: AttackStatus = "leaked" if verdict.attack_succeeded else "blocked"
@@ -290,7 +298,19 @@ class Runner:
             # only exist among rows it called "leaked" - a blocked row
             # can't be a false leak, so re-judging it would just spend
             # API calls for no possible change in outcome.
-            if self._verify_leaks_judge is not None and status == "leaked":
+            #
+            # Retrieval-scoring judges are excluded outright: leak
+            # verification corrects a false positive in *answer text*, and a
+            # judge that read `sources` to decide the document was retrieved
+            # has no such false positive to correct. Letting an answer-based
+            # verifier run here would flip every real retrieval hijack to
+            # "blocked" (the answer contains no canary, so it always
+            # disagrees) and report a fully poisoned retriever as perfect.
+            if (
+                self._verify_leaks_judge is not None
+                and status == "leaked"
+                and not getattr(judge, "scores_retrieval", False)
+            ):
                 try:
                     verify_verdict = self._verify_leaks_judge.judge(
                         JudgeContext(
@@ -298,6 +318,7 @@ class Runner:
                             question=pattern.question,
                             answer=answer,
                             sources=sources,
+                            document_id=document_id,
                         )
                     )
                     if not verify_verdict.attack_succeeded:
@@ -389,11 +410,7 @@ class Runner:
                 warned = True
             return outcome, warned
 
-        # Substring match, not equality: a pipeline may return
-        # "raginject-<id>.txt" or a path/URL containing the id rather than
-        # the bare id. The ids are unique and implausible, so this is not a
-        # realistic source of false positives.
-        if any(document_id in source for source in outcome.sources):
+        if source_matches_document(outcome.sources, document_id):
             return outcome, warned
 
         outcome = AttackOutcome(
@@ -448,6 +465,19 @@ class Runner:
                 "before run()"
             )
 
+        if getattr(self._verify_leaks_judge, "scores_retrieval", False):
+            # Leak verification re-reads the *answer* to catch a primary
+            # judge that called a correct refusal a leak. A retrieval-scoring
+            # judge never reads the answer, so as a verifier it would judge
+            # every row against a document id it has no verdict to correct -
+            # silently flipping real leaks to "blocked". There is no
+            # configuration in which this combination measures anything.
+            raise ConfigurationError(
+                "a retrieval-scoring judge cannot be used to verify leaks: "
+                "leak verification re-judges the answer text, which such a "
+                "judge never reads. Pass it as the primary judge instead."
+            )
+
         judge_for_pattern: Dict[str, Judge] = {}
         for pattern in patterns:
             if self._judge_override is not None:
@@ -456,6 +486,19 @@ class Runner:
                 judge_name = pattern.success_criteria.type
                 judge = self._get_judge(judge_name)
             judge.validate_criteria(pattern.success_criteria)
+            if getattr(judge, "scores_retrieval", False) and self.mode == "b":
+                # A retrieval-scoring judge has nothing to score without a
+                # real corpus and retriever standing behind the target - in
+                # mode B the "document" never goes anywhere a retriever
+                # could rank it. Caught here, in preflight, so it costs zero
+                # queries and applies to the per-pattern *resolved* judge,
+                # so `--judge retrieval_match` (the override) is covered
+                # too, not just a pattern that names it directly.
+                raise ConfigurationError(
+                    f"pattern {pattern.id!r} uses a retrieval-scoring judge "
+                    f"({pattern.success_criteria.type!r}), which requires "
+                    "corpus injection mode; pass --corpus-injector to enable it"
+                )
             judge_for_pattern[pattern.id] = judge
             if self._verify_leaks_judge is not None:
                 self._verify_leaks_judge.validate_criteria(pattern.success_criteria)
@@ -504,8 +547,42 @@ class Runner:
 
             outcome = None
             try:
-                outcome = self._run_one(pattern, judge, context=None)
-                if self.verify_retrieval and outcome.status != "error":
+                outcome = self._run_one(
+                    pattern, judge, context=None, document_id=document_id
+                )
+                if getattr(judge, "scores_retrieval", False):
+                    # For these patterns "not retrieved" *is* the blocked
+                    # verdict - the judge already decided that by reading
+                    # `sources` itself, so running it back through
+                    # `_verify_retrieval` would turn a correct "blocked"
+                    # into an unscoreable "error". But a target that
+                    # reports no `sources` at all hasn't actually been
+                    # measured - scoring that as "blocked" would report an
+                    # unmeasurable pipeline as safe, a false all-clear. This
+                    # replacement is unconditional (not gated on
+                    # `verify_retrieval`/`--no-verify-retrieval`): for
+                    # these patterns it *is* the measurement, not a
+                    # verification layered on top of one.
+                    if outcome.status != "error" and not outcome.sources:
+                        outcome = AttackOutcome(
+                            pattern_id=outcome.pattern_id,
+                            category=outcome.category,
+                            status="error",
+                            question=outcome.question,
+                            injected_content=outcome.injected_content,
+                            answer=outcome.answer,
+                            sources=outcome.sources,
+                            verdict_reason=(
+                                "target returned no sources, so retrieval "
+                                "cannot be measured"
+                            ),
+                            error=(
+                                "retrieval_match judge requires the target "
+                                "to report `sources`; got an empty list"
+                            ),
+                            duration_ms=outcome.duration_ms,
+                        )
+                elif self.verify_retrieval and outcome.status != "error":
                     outcome, warned_unverifiable = self._verify_retrieval(
                         outcome, document_id, warned=warned_unverifiable
                     )

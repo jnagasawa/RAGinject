@@ -6,10 +6,22 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 import yaml
 from pydantic import ValidationError
 
-from ..errors import PatternError
+from ..errors import ConfigurationError, PatternError
 from .schema import AttackPattern
 
 DEFAULT_PATTERNS_PATH = Path(__file__).parent / "patterns"
+
+#: Built-in pattern sets that are opt-in only - never merged into
+#: `load_default_patterns()` - reachable from the CLI via `--pattern-set`.
+#: Kept out of the default corpus deliberately: adding them there would
+#: change every existing user's default pattern count/ids, which
+#: `check_comparable` (see `raginject.baseline`) would then reject every
+#: existing `--baseline` file over.
+PATTERN_SETS_PATH = Path(__file__).parent / "pattern_sets"
+
+BUILTIN_PATTERN_SETS: Dict[str, Path] = {
+    "retriever": PATTERN_SETS_PATH / "retriever",
+}
 
 
 def _format_validation_error(
@@ -126,6 +138,35 @@ def load_patterns(path: Optional[Union[str, Path]] = None) -> List[AttackPattern
         return load_default_patterns()
 
     files = iter_pattern_files(path)
+    all_patterns: List[AttackPattern] = []
+    for file_path in files:
+        all_patterns.extend(_load_file(file_path))
+    return _merge(all_patterns)
+
+
+def available_pattern_sets() -> List[str]:
+    """Names of the built-in opt-in pattern sets reachable via `--pattern-set`."""
+    return sorted(BUILTIN_PATTERN_SETS.keys())
+
+
+def load_pattern_set(name: str) -> List[AttackPattern]:
+    """Load a built-in opt-in pattern set by name (e.g. "retriever").
+
+    Reuses the same file-loading/merge path as `load_default_patterns()` -
+    `iter_pattern_files()` + `_load_file()` + `_merge()` - so a set with
+    multiple YAML files behaves identically to the default corpus.
+
+    Raises `ConfigurationError` (not `PatternError`) for an unknown name:
+    this is a user setup mistake caught before any query is sent, and the
+    CLI maps `ConfigurationError` to exit code 2 for exactly that reason.
+    """
+    set_path = BUILTIN_PATTERN_SETS.get(name)
+    if set_path is None:
+        available = ", ".join(available_pattern_sets()) or "(none)"
+        raise ConfigurationError(
+            f"unknown pattern set {name!r}; available pattern sets: {available}"
+        )
+    files = iter_pattern_files(set_path)
     all_patterns: List[AttackPattern] = []
     for file_path in files:
         all_patterns.extend(_load_file(file_path))

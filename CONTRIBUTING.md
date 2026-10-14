@@ -124,6 +124,38 @@ judgment calls a test can't make for you.
 - **A pattern nothing ever leaks is dead weight, not a win.** If every model
   blocks it outright, it costs a query and contributes no signal.
 
+### Adding a retriever-poisoning pattern
+
+The opt-in `retriever` pattern set (`src/raginject/attacks/pattern_sets/retriever/`,
+`raginject run --pattern-set retriever`) targets retrieval, not generation: success
+is whether the injected document gets ranked into a target's `sources`, judged by
+`retrieval_match`, and the answer text is never read. Its authoring rules are
+*different* from the default corpus above, and two of them pull in opposite
+directions on purpose:
+
+1. **The payload must carry its question's terms.** It has to compete for the
+   same query a real retriever would score it against, or no retriever on earth
+   ever ranks it and the pattern can never fire. A payload that can't fire scores
+   "blocked" forever and reports a poisoned retriever as safe — the retrieval
+   analogue of "the payload must be able to fire against the target it runs on"
+   above. `tests/test_retriever_patterns.py::test_every_payload_competes_for_its_own_question`
+   enforces this statically (a lexical term-overlap check, so it stops a
+   regression but doesn't guarantee real embedding-space overlap).
+2. **The payload must not actually answer the question.** Keyword stuffing, bare
+   topic lists, and canonical/authority framing only — never real content. That's
+   what makes retrieving one a failure rather than a correct result: a document
+   with no answer in it has no business outranking the document that does.
+
+Other differences from the default corpus: `question` must be plausible for an
+arbitrary organization's corpus and unrelated to the injected document — a
+built-in pattern can't know the user's real corpus, so it can't supply a document
+of its own to displace; each user's own corpus provides that legitimate document.
+No canaries and no `forbidden_in_answer` — the `retrieval_match` judge never reads
+the answer, and `validate_criteria` raises `ConfigurationError` if
+`forbidden_in_answer` is set (it would otherwise be silently ignored). The default
+corpus's ASCII-double-quoted-canary convention doesn't apply here either, for the
+same reason.
+
 ## Adding a judge
 
 Subclass `raginject.judges.base.Judge` and register it with

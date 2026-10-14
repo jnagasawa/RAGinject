@@ -13,6 +13,24 @@ retrieval, not just generation.
 """
 
 from abc import ABC, abstractmethod
+from typing import List, Optional
+
+
+def source_matches_document(sources: List[str], document_id: Optional[str]) -> bool:
+    """True if `document_id` shows up among `sources` - substring match, not
+    equality, because a pipeline may report "raginject-<id>.txt" or a
+    path/URL containing the id rather than the bare id. The ids raginject
+    generates are unique and implausible strings, so substring matching here
+    is not a realistic source of false positives.
+
+    `document_id` is `None` in mode B (there is no injected document to
+    match against), which this always reports as no match rather than
+    raising - callers that only have a document id in mode A can pass
+    whatever they have without a separate mode check.
+    """
+    if document_id is None:
+        return False
+    return any(document_id in source for source in sources)
 
 
 class CorpusInjector(ABC):

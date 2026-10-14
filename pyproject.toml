@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "raginject"
-version = "0.7.0"
+version = "0.8.0"
 description = "Evaluation harness for indirect prompt injection and retrieval poisoning resistance in RAG pipelines"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -41,7 +41,7 @@ where = ["src"]
 include = ["raginject*"]
 
 [tool.setuptools.package-data]
-raginject = ["attacks/patterns/*.yaml", "py.typed"]
+raginject = ["attacks/patterns/*.yaml", "attacks/pattern_sets/*/*.yaml", "py.typed"]
 
 [tool.ruff]
 target-version = "py39"

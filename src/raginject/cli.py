@@ -24,7 +24,12 @@ from typing import Optional, Tuple
 import click
 
 from ._version import __version__
-from .attacks.loader import load_default_patterns, load_patterns
+from .attacks.loader import (
+    available_pattern_sets,
+    load_default_patterns,
+    load_pattern_set,
+    load_patterns,
+)
 from .baseline import check_comparable, compare, load_baseline
 from .core import Runner
 from .errors import ConfigurationError, RagInjectError
@@ -124,10 +129,18 @@ def _build_target(
 
 
 def _load_all_patterns(
-    runner: Runner, patterns: Tuple[str, ...], no_default_patterns: bool
+    runner: Runner,
+    patterns: Tuple[str, ...],
+    no_default_patterns: bool,
+    pattern_set: Tuple[str, ...] = (),
 ) -> None:
+    # Order matters: default corpus, then --pattern-set, then --patterns -
+    # each stage merges additively (later wins, first position kept), same
+    # as Runner.add_patterns/load_patterns already do.
     if not no_default_patterns:
         runner.load_patterns(None)
+    for name in pattern_set:
+        runner.add_patterns(load_pattern_set(name))
     for path in patterns:
         runner.load_patterns(path)
 
@@ -222,6 +235,12 @@ def _resolve_color(explicit: Optional[bool], is_tty: bool) -> bool:
 @click.option("--timeout", default=None, type=float, help="default: 30.0")
 @click.option("--patterns", multiple=True, help="pattern file/dir, repeatable")
 @click.option("--no-default-patterns", is_flag=True, default=False)
+@click.option(
+    "--pattern-set",
+    multiple=True,
+    help="opt-in built-in pattern set, repeatable; available: "
+    + ", ".join(available_pattern_sets()),
+)
 @click.option("--plugin", multiple=True, help="module to import, repeatable")
 @click.option("--output", default="text", help="text, json, or a registered formatter")
 @click.option("--max-answer-chars", default=2000, show_default=True, type=int)
@@ -285,6 +304,7 @@ def run(
     timeout,
     patterns,
     no_default_patterns,
+    pattern_set,
     plugin,
     output,
     max_answer_chars,
@@ -410,7 +430,7 @@ def run(
             corpus_injector=injector,
             verify_retrieval=not no_verify_retrieval,
         )
-        _load_all_patterns(runner, patterns, no_default_patterns)
+        _load_all_patterns(runner, patterns, no_default_patterns, pattern_set)
 
         if baseline_report is not None:
             # Comparability is checked before a single query is sent: a
@@ -521,7 +541,13 @@ def validate(paths):
 @main.command("list-patterns")
 @click.option("--patterns", multiple=True, help="pattern file/dir, repeatable")
 @click.option("--no-default-patterns", is_flag=True, default=False)
-def list_patterns(patterns, no_default_patterns):
+@click.option(
+    "--pattern-set",
+    multiple=True,
+    help="opt-in built-in pattern set, repeatable; available: "
+    + ", ".join(available_pattern_sets()),
+)
+def list_patterns(patterns, no_default_patterns, pattern_set):
     """List available attack patterns (id / category / judge / description)."""
     try:
         # Merge exactly as `run` does (later wins, first position kept), so
@@ -529,6 +555,9 @@ def list_patterns(patterns, no_default_patterns):
         merged = {}
         if not no_default_patterns:
             for pattern in load_default_patterns():
+                merged[pattern.id] = pattern
+        for name in pattern_set:
+            for pattern in load_pattern_set(name):
                 merged[pattern.id] = pattern
         for path in patterns:
             for pattern in load_patterns(path):

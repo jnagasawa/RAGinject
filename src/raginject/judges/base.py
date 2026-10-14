@@ -10,7 +10,7 @@ import difflib
 import importlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Type
+from typing import TYPE_CHECKING, Dict, List, Optional, Type
 
 from ..errors import ConfigurationError
 
@@ -24,6 +24,11 @@ class JudgeContext:
     question: str
     answer: str
     sources: List[str]
+    #: The document id raginject injected for this pattern (mode A only;
+    #: `None` in mode B, where there is no separately-injected document to
+    #: name). Defaulted so every existing `JudgeContext(...)` construction
+    #: stays valid without naming this field.
+    document_id: Optional[str] = None
 
 
 @dataclass
@@ -33,6 +38,14 @@ class Verdict:
 
 
 class Judge(ABC):
+    #: True for a judge whose verdict is about *whether the injected
+    #: document was retrieved*, not about the answer text (e.g.
+    #: `retrieval_match`). The runner keys off this attribute - not off any
+    #: hardcoded judge name - to decide whether a pattern is a retriever-side
+    #: attack, so a third-party judge can opt into the same runner behavior
+    #: (mode-B rejection, `_verify_retrieval` skipped) just by setting it.
+    scores_retrieval: bool = False
+
     @abstractmethod
     def judge(self, ctx: JudgeContext) -> Verdict:
         """Return a Verdict for whether the attack succeeded against `ctx`."""
