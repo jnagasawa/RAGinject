@@ -45,6 +45,7 @@ a full run costs nothing and takes milliseconds.
 [How it works](#how-it-works)
 
 **Going further:** [Corpus injection (mode A)](#corpus-injection-mode-a) ·
+[LangChain and LlamaIndex](#langchain-and-llamaindex) ·
 [Retriever-side attacks](#retriever-side-attacks) ·
 [Catching regressions](#catching-regressions) ·
 [Custom attack patterns](#custom-attack-patterns) ·
@@ -463,6 +464,85 @@ raginject run --target-module raginject.demo:defended_corpus_rag \
 A full runnable example, with an in-memory corpus and a question-only RAG
 function, is in
 [`examples/example_corpus_injector.py`](examples/example_corpus_injector.py).
+
+## LangChain and LlamaIndex
+
+If your pipeline is built with LangChain or LlamaIndex you do not have to write
+a `CorpusInjector` yourself. `raginject.integrations` ships an injector and a
+target for each, both using [mode A](#corpus-injection-mode-a): raginject
+writes the attack document into your real vector store or index, and your
+unchanged chain or query engine retrieves it. The adapters are duck typed and
+import neither framework, so installing raginject adds no dependencies.
+
+**LangChain.** Wrap your `VectorStore` and your chain:
+
+```python
+from raginject import Runner
+from raginject.integrations.langchain import (
+    LangChainTarget,
+    LangChainVectorStoreInjector,
+)
+
+injector = LangChainVectorStoreInjector(vectorstore)
+target = LangChainTarget(chain, input_key="input")
+
+runner = Runner(target, corpus_injector=injector)
+runner.load_patterns()
+result = runner.run()
+```
+
+`chain` is anything with `.invoke`. A chain built with `create_retrieval_chain`
+takes and returns dicts, so pass `input_key="input"`; it returns `answer` and
+`context` (the retrieved Documents), which are the default `answer_key` and
+`sources_key`. A chain that returns a plain string or a message works too, but
+returns no sources, so raginject cannot verify retrieval.
+
+**LlamaIndex.** Wrap your index, and pass a function that builds the query
+engine:
+
+```python
+from raginject import Runner
+from raginject.integrations.llamaindex import LlamaIndexInjector, LlamaIndexTarget
+
+injector = LlamaIndexInjector(index)
+target = LlamaIndexTarget(lambda: index.as_query_engine())
+
+runner = Runner(target, corpus_injector=injector)
+runner.load_patterns()
+result = runner.run()
+```
+
+Pass the function, not an engine you built earlier: `index.as_query_engine()`
+snapshots the index's node ids when it is built, so an engine created before
+injection never retrieves the attack document. `LlamaIndexInjector` needs
+`llama-index-core` installed (you already have it).
+
+**CLI.** Put the two objects in a module and point `raginject run` at them:
+
+```python
+# rag_eval.py
+from raginject.integrations.langchain import (
+    LangChainTarget,
+    LangChainVectorStoreInjector,
+)
+
+from myapp.rag import chain, vectorstore
+
+target = LangChainTarget(chain, input_key="input")
+injector = LangChainVectorStoreInjector(vectorstore)
+```
+
+```bash
+raginject run --target-module rag_eval:target --corpus-injector rag_eval:injector
+```
+
+These write into the store or index you give them, and delete each document
+afterwards. Point them at a test or staging store: using a production one is
+your call, and a crash mid-run can leave attack documents behind (they are
+named `raginject-<pattern id>`). Runnable offline examples, with fake
+embeddings and models, are in
+[`examples/example_langchain.py`](examples/example_langchain.py) and
+[`examples/example_llamaindex.py`](examples/example_llamaindex.py).
 
 ## Retriever-side attacks
 

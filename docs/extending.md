@@ -122,6 +122,57 @@ raginject run --target-url https://my-api.example.com/ask \
   --header "Authorization: Bearer $MY_TOKEN"
 ```
 
+## LangChain and LlamaIndex integrations
+
+Both live in `raginject.integrations` and are duck typed: they import neither
+framework at module load. They are mode A only (see "Corpus injection" in the
+README) and write into the store you give them.
+
+**`LangChainVectorStoreInjector(vectorstore)`**
+
+- `inject(document_id, content)` calls
+  `vectorstore.add_texts([content], metadatas=[{"source": document_id}], ids=[document_id])`.
+- `remove(document_id)` calls `vectorstore.delete(ids=[document_id])`.
+- `description` is `LangChainVectorStoreInjector(<class name>)`, never a
+  connection string.
+
+**`LangChainTarget(chain, *, input_key=None, answer_key="answer", sources_key="context")`**
+
+- Calls `chain.invoke(question)`, or `chain.invoke({input_key: question})` when
+  `input_key` is set (use `"input"` for `create_retrieval_chain`).
+- A `str` output is the answer; so is an object with a `str` `.content` (a chat
+  message). Both have no sources.
+- A `dict` output takes the answer from `answer_key` (a `str` or a message) and
+  the sources from `sources_key`: each Document becomes its `id`, else its
+  `metadata["source"]`; entries with neither are dropped. A missing
+  `sources_key` means no sources.
+- Anything else, or a dict without `answer_key`, raises `TargetResponseError`.
+- A non-empty `context` raises `ConfigurationError` (the target is
+  question-only). An exception from the chain becomes a `TargetError`, so that
+  one query is an `error` row and the run continues.
+
+**`LlamaIndexInjector(index)`**
+
+- `inject` calls `index.insert(Document(text=content, doc_id=document_id, metadata={"source": document_id}))`.
+  `Document` is imported lazily; without `llama-index-core` it raises
+  `ConfigurationError`.
+- `remove` calls `index.delete_ref_doc(document_id, delete_from_docstore=True)`.
+
+**`LlamaIndexTarget(query_engine)`**
+
+- `query_engine` is an object with `.query`, or a zero-argument function
+  returning one, called once per query. Prefer the function: an engine from
+  `index.as_query_engine()` snapshots the index's node ids when built, so one
+  built before `inject` never retrieves the injected document.
+- The answer is `str(response.response)`, or `""` when it is `None`. Sources
+  are each `response.source_nodes` entry's `node.ref_doc_id`, else
+  `node.metadata["source"]`, with empty values dropped.
+- `context` and exception handling match `LangChainTarget`.
+
+Mode A's retrieval check and the `retrieval_match` judge look for the injected
+document id in `sources`, which is why both injectors stamp it as the id and as
+`metadata["source"]` and both targets read it back.
+
 ## Function signature detection
 
 `FunctionTarget` inspects your function's signature once, at construction
