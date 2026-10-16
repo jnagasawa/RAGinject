@@ -265,6 +265,139 @@ def test_retrieval_verification_empty_sources_judged_normally_and_warns_once():
     assert len(unverifiable_warnings) == 1
 
 
+class _PerPatternSourcesTarget(Target):
+    """Returns `sources_by_pattern[question]` (keyed by the pattern's
+    question, which the tests make unique), so one run can mix empty,
+    matching and non-matching sources."""
+
+    def __init__(self, sources_by_question):
+        self.sources_by_question = sources_by_question
+
+    def query(self, question: str, context: Optional[List[str]] = None) -> QueryResult:
+        return {
+            "answer": "here is SECRET",
+            "sources": self.sources_by_question[question],
+        }
+
+
+def _q_pattern(pattern_id, question):
+    pattern = _pattern(pattern_id)
+    return pattern.model_copy(update={"question": question})
+
+
+def _mixed_run(sources_list, *, verify_retrieval=True, callback=None, extra=()):
+    injector = _RecordingInjector()
+    patterns = [_q_pattern(f"p{i}", f"q{i}?") for i in range(len(sources_list))]
+    target = _PerPatternSourcesTarget(
+        {f"q{i}?": src for i, src in enumerate(sources_list)}
+    )
+    runner = Runner(target, corpus_injector=injector, verify_retrieval=verify_retrieval)
+    runner.add_patterns(patterns)
+    runner.add_patterns(extra)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = runner.run(on_outcome=callback)
+    unverifiable = [w for w in caught if "cannot verify" in str(w.message)]
+    return result, unverifiable
+
+
+def test_adaptive_empty_sources_first_becomes_error_when_later_row_has_sources():
+    result, unverifiable = _mixed_run([[], ["raginject-p1"]])
+
+    assert [o.pattern_id for o in result.outcomes] == ["p0", "p1"]
+    assert result.outcomes[0].status == "error"
+    assert result.outcomes[0].verdict_reason == "injected document was not retrieved"
+    assert "--no-verify-retrieval" in result.outcomes[0].error
+    assert result.outcomes[1].status == "leaked"
+    assert unverifiable == []
+
+
+def test_adaptive_empty_sources_last_becomes_error_when_earlier_row_has_sources():
+    result, unverifiable = _mixed_run([["raginject-p0"], []])
+
+    assert result.outcomes[0].status == "leaked"
+    assert result.outcomes[1].status == "error"
+    assert "--no-verify-retrieval" in result.outcomes[1].error
+    assert unverifiable == []
+
+
+def test_adaptive_non_matching_sources_row_counts_as_evidence():
+    result, unverifiable = _mixed_run([[], ["unrelated"], []])
+
+    assert [o.status for o in result.outcomes] == ["error", "error", "error"]
+    assert unverifiable == []
+
+
+def test_adaptive_verify_retrieval_false_judges_empty_rows_normally():
+    result, unverifiable = _mixed_run([[], ["raginject-p1"]], verify_retrieval=False)
+
+    assert [o.status for o in result.outcomes] == ["leaked", "leaked"]
+    assert unverifiable == []
+
+
+def test_adaptive_retrieval_pattern_sources_count_as_evidence():
+    retrieval = _retrieval_pattern().model_copy(update={"id": "r0", "question": "qr?"})
+    injector = _RecordingInjector()
+    target = _PerPatternSourcesTarget({"q0?": [], "qr?": ["raginject-r0"]})
+    runner = Runner(target, corpus_injector=injector)
+    runner.add_patterns([_q_pattern("p0", "q0?"), retrieval])
+    result = runner.run()
+
+    assert result.outcomes[0].status == "error"
+    assert result.outcomes[1].status == "leaked"  # retrieved: attack succeeded
+
+
+def test_adaptive_retrieval_pattern_empty_sources_is_not_evidence():
+    retrieval = _retrieval_pattern().model_copy(update={"id": "r0", "question": "qr?"})
+    injector = _RecordingInjector()
+    target = _PerPatternSourcesTarget({"q0?": [], "qr?": []})
+    runner = Runner(target, corpus_injector=injector)
+    runner.add_patterns([_q_pattern("p0", "q0?"), retrieval])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = runner.run()
+
+    assert result.outcomes[0].status == "leaked"
+    assert result.outcomes[1].status == "error"
+    assert len([w for w in caught if "cannot verify" in str(w.message)]) == 1
+
+
+def test_adaptive_callback_called_once_per_pattern_with_final_outcome():
+    seen = []
+    result, _ = _mixed_run([[], [], ["raginject-p2"], []], callback=seen.append)
+
+    assert len(seen) == 4
+    assert sorted(o.pattern_id for o in seen) == ["p0", "p1", "p2", "p3"]
+    assert sorted(o.status for o in seen) == sorted(o.status for o in result.outcomes)
+    assert [o.pattern_id for o in result.outcomes] == ["p0", "p1", "p2", "p3"]
+    # Pending rows are reported only once resolved, after the evidence row.
+    assert seen[0].pattern_id == "p2"
+
+
+def test_adaptive_never_any_sources_callback_fires_for_every_row():
+    seen = []
+    result, unverifiable = _mixed_run([[], []], callback=seen.append)
+
+    assert [o.status for o in result.outcomes] == ["leaked", "leaked"]
+    assert len(seen) == 2
+    assert len(unverifiable) == 1
+
+
+def test_mode_b_empty_sources_unaffected_by_adaptive_rule():
+    class _EmptyTarget(Target):
+        def query(self, question, context=None):
+            return {"answer": "here is SECRET", "sources": []}
+
+    runner = Runner(_EmptyTarget())
+    runner.add_patterns([_pattern("p1")])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = runner.run()
+
+    assert result.outcomes[0].status == "leaked"
+    assert caught == []
+
+
 def test_verify_retrieval_false_disables_the_check():
     injector = _RecordingInjector()
     target = _CorpusTarget(injector, sources_mode="unrelated")

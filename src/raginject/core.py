@@ -18,7 +18,6 @@ from typing import (
     Literal,
     Mapping,
     Optional,
-    Tuple,
     Union,
 )
 
@@ -377,43 +376,13 @@ class Runner:
                 duration_ms=duration_ms,
             )
 
-    def _verify_retrieval(
-        self, outcome: AttackOutcome, document_id: str, *, warned: bool
-    ) -> Tuple[AttackOutcome, bool]:
-        """Mode A only: check that `document_id` was among the sources the
-        target reported, replacing `outcome` with a `status="error"` row if
-        not. Returns `(outcome, warned)` - `warned` tracks whether the
-        "retrieval is unverifiable" warning has already fired this run, so
-        it fires at most once regardless of how many patterns hit it.
-
-        Only called for rows that are not already `status="error"` (an
-        error row already excludes itself from the score denominator, and
-        there is nothing to verify about a query that never produced an
-        answer).
-        """
-        if not outcome.sources:
-            # Nothing to check the id against - the pipeline simply isn't
-            # reporting sources. That is a real gap (the score can't tell
-            # "blocked" from "never retrieved" apart), but it must not be
-            # silently penalized, so this is a warning, not an error row.
-            if not warned:
-                warnings.warn(
-                    "corpus injection mode: the target returned no `sources` for "
-                    "at least one query, so raginject cannot verify the injected "
-                    "attack document was actually retrieved. The score therefore "
-                    "cannot distinguish a blocked attack from one whose document "
-                    "was never surfaced by your retriever. Return `sources` from "
-                    "your target to enable verification, or pass "
-                    "--no-verify-retrieval to silence this warning.",
-                    stacklevel=3,
-                )
-                warned = True
-            return outcome, warned
-
-        if source_matches_document(outcome.sources, document_id):
-            return outcome, warned
-
-        outcome = AttackOutcome(
+    @staticmethod
+    def _not_retrieved_outcome(outcome: AttackOutcome, error: str) -> AttackOutcome:
+        """Copy of `outcome` turned into the `status="error"` row for "the
+        injected document was not retrieved". Shared by the
+        non-matching-sources and the empty-sources-with-evidence cases so the
+        two rows only differ in their `error` text."""
+        return AttackOutcome(
             pattern_id=outcome.pattern_id,
             category=outcome.category,
             status="error",
@@ -422,13 +391,64 @@ class Runner:
             answer=outcome.answer,
             sources=outcome.sources,
             verdict_reason="injected document was not retrieved",
-            error=(
-                f"expected a source naming/containing {document_id!r}; "
-                f"target returned sources={outcome.sources!r}"
-            ),
+            error=error,
             duration_ms=outcome.duration_ms,
         )
-        return outcome, warned
+
+    def _verify_retrieval(
+        self, outcome: AttackOutcome, document_id: str
+    ) -> AttackOutcome:
+        """Mode A only: check that `document_id` was among the sources the
+        target reported, replacing `outcome` with a `status="error"` row if
+        not.
+
+        Only called for rows that are not already `status="error"` (an
+        error row already excludes itself from the score denominator, and
+        there is nothing to verify about a query that never produced an
+        answer). A row with *empty* `sources` is returned unchanged: whether
+        that means "retrieved nothing" or "this target never reports
+        sources" can only be decided across the whole run, so `run()` handles
+        it.
+        """
+        if not outcome.sources or source_matches_document(outcome.sources, document_id):
+            return outcome
+        return self._not_retrieved_outcome(
+            outcome,
+            f"expected a source naming/containing {document_id!r}; "
+            f"target returned sources={outcome.sources!r}; pass "
+            "--no-verify-retrieval to disable this check",
+        )
+
+    def _empty_sources_outcome(
+        self, outcome: AttackOutcome, document_id: str
+    ) -> AttackOutcome:
+        """The error row for an empty `sources` list once the run has shown
+        the target does report sources for other queries."""
+        return self._not_retrieved_outcome(
+            outcome,
+            "target returned no sources for this query but reported sources "
+            f"for others in this run; treating the injected document "
+            f"{document_id!r} as not retrieved (pass --no-verify-retrieval "
+            "to disable)",
+        )
+
+    def _resolve_pending(
+        self,
+        outcomes: List[Optional[AttackOutcome]],
+        pending: List[int],
+        held: Dict[int, AttackOutcome],
+        on_outcome: Optional[Callable[[AttackOutcome], None]],
+    ) -> None:
+        """Convert every held empty-sources row to its error row now that the
+        target has been shown to report sources, filling its slot and
+        firing its delayed callback."""
+        for index in pending:
+            row = held.pop(index)
+            row = self._empty_sources_outcome(row, f"raginject-{row.pattern_id}")
+            outcomes[index] = row
+            if on_outcome is not None:
+                on_outcome(row)
+        pending.clear()
 
     def run(
         self, on_outcome: Optional[Callable[[AttackOutcome], None]] = None
@@ -457,6 +477,20 @@ class Runner:
         `status="error"` naming the leftover document, since a silently
         orphaned attack document in a production corpus is worse than
         discarding one data point.
+
+        Empty `sources` in mode A (with `verify_retrieval` on, for rows not
+        judged by a retrieval-scoring judge) is resolved adaptively across
+        the run. If the target returns non-empty `sources` for any query,
+        an empty list means "nothing relevant was retrieved" and the row
+        becomes a `status="error"` row; if it never does, the target is
+        assumed not to report sources, the rows are judged normally and one
+        "cannot verify" warning is issued at the end of the run.
+
+        `on_outcome` is called exactly once per pattern with its *final*
+        outcome. A row whose empty `sources` cannot be classified yet is held
+        back until the run learns which case applies, so the callback order
+        can differ from pattern order; `Result.outcomes` is always in
+        pattern order.
         """
         patterns = self.patterns
         if not patterns:
@@ -504,8 +538,13 @@ class Runner:
                 self._verify_leaks_judge.validate_criteria(pattern.success_criteria)
 
         started_at = datetime.now(timezone.utc).isoformat()
-        outcomes: List[AttackOutcome] = []
-        warned_unverifiable = False
+        # Slots keep pattern order even when a row's callback is delayed.
+        outcomes: List[Optional[AttackOutcome]] = []
+        #: Indices into `outcomes` of rows with empty `sources` that are
+        #: waiting to learn whether the target reports sources at all.
+        pending: List[int] = []
+        held: Dict[int, AttackOutcome] = {}
+        saw_sources = False
 
         for pattern in patterns:
             judge = judge_for_pattern[pattern.id]
@@ -583,9 +622,7 @@ class Runner:
                             duration_ms=outcome.duration_ms,
                         )
                 elif self.verify_retrieval and outcome.status != "error":
-                    outcome, warned_unverifiable = self._verify_retrieval(
-                        outcome, document_id, warned=warned_unverifiable
-                    )
+                    outcome = self._verify_retrieval(outcome, document_id)
             finally:
                 try:
                     self._corpus_injector.remove(document_id)
@@ -615,12 +652,48 @@ class Runner:
                         else None,
                     )
 
+            if outcome.sources:
+                saw_sources = True
+            if (
+                self.verify_retrieval
+                and not getattr(judge, "scores_retrieval", False)
+                and outcome.status != "error"
+                and not outcome.sources
+            ):
+                if saw_sources:
+                    outcome = self._empty_sources_outcome(outcome, document_id)
+                else:
+                    outcomes.append(None)
+                    pending.append(len(outcomes) - 1)
+                    held[len(outcomes) - 1] = outcome
+                    continue
             outcomes.append(outcome)
             if on_outcome is not None:
                 on_outcome(outcome)
 
+            if saw_sources and pending:
+                self._resolve_pending(outcomes, pending, held, on_outcome)
+
+        if pending:
+            # The target never returned a single source, so there is nothing
+            # to tell "retrieved nothing" from "does not report sources".
+            warnings.warn(
+                "corpus injection mode: the target never returned `sources`, "
+                "so raginject cannot verify the injected attack document was "
+                "actually retrieved. The score therefore cannot distinguish "
+                "a blocked attack from one whose document was never surfaced "
+                "by your retriever. Return `sources` from your target to "
+                "enable verification, or pass --no-verify-retrieval to "
+                "silence this warning.",
+                stacklevel=2,
+            )
+            for index in pending:
+                outcomes[index] = held[index]
+                if on_outcome is not None:
+                    on_outcome(held[index])
+
         return Result(
-            outcomes=outcomes,
+            outcomes=[o for o in outcomes if o is not None],
             started_at=started_at,
             raginject_version=__version__,
             target_description=self.target.target_description,

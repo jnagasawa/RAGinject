@@ -38,7 +38,8 @@ a full run costs nothing and takes milliseconds.
 
 ## Contents
 
-**Start here:** [Why](#why) · [Install](#install) ·
+**Start here:** [Why](#why) · [How it compares](#how-it-compares) ·
+[Install](#install) ·
 [Try it in 30 seconds](#try-it-in-30-seconds-no-rag-app-required) ·
 [Quickstart](#quickstart) ([Python API](#python-api) · [CLI](#cli) ·
 [pytest](#in-your-pytest-suite) · [CI](#in-ci-github-actions)) ·
@@ -86,6 +87,32 @@ so even a question-only pipeline is testable.
   request weakens your defenses, so it fails CI instead of merging quietly.
 - And it's yours to extend: attack patterns are plain YAML you can write, and
   judges and report formats are registered by name.
+
+## How it compares
+
+raginject is deliberately narrow, and it is meant to sit next to the broader
+LLM security tools rather than replace them. As of 2026-10:
+
+| | Primary focus | Injection via documents | Plants attack docs in your real store | Scores whether the planted doc was retrieved |
+|---|---|---|---|---|
+| **raginject** | RAG pipelines, as a regression gate | Yes (52 built-in patterns) | Yes: writes, queries, then removes ([mode A](#corpus-injection-mode-a)), with LangChain/LlamaIndex injectors | Yes, from the returned `sources` alone ([retriever-side attacks](#retriever-side-attacks)) |
+| [promptfoo](https://github.com/promptfoo/promptfoo) | Broad LLM app evaluation and red teaming | Yes (`indirect-prompt-injection` plugin) | Partly: `redteam poison` generates poisoned docs and you ingest them yourself | Not built in |
+| [garak](https://github.com/NVIDIA/garak) | Model vulnerability scanning | Yes (`latentinjection` probes, sent as a single prompt) | Not built in | Not built in |
+| [PyRIT](https://github.com/microsoft/PyRIT) | Red-team automation toolkit | Yes (XPIA workflow) | Not built in | Not built in |
+| [Giskard](https://github.com/Giskard-AI/giskard-oss) (v3) | LLM app testing and quality scans | Prompt injection in `vulnerability_scan` | Not built in | Not built in |
+
+"Not built in" means not part of the documented feature set; every one of
+these tools is extensible, so you could build it yourself.
+
+What raginject does **not** do, and where to go instead:
+
+- No jailbreak, toxicity, or harmful-content coverage, and no multi-turn
+  attacks. Use garak or PyRIT to red-team the model itself.
+- No generated or adaptive attacks. The corpus is fixed on purpose, so two
+  runs are comparable (`--baseline`), but it will not discover novel
+  payloads. promptfoo and PyRIT generate attacks.
+- No catalogue of model providers. raginject calls *your* pipeline, through a
+  Python function or an HTTP endpoint, and never a model directly.
 
 ## Install
 
@@ -442,11 +469,15 @@ document it just injected (id `raginject-<pattern.id>`) shows up among the
 counts, so a suffixed filename or a path still matches). If it doesn't, the
 row becomes `status: error`, excluded from the score rather than counted as
 `blocked`, because a defense that was never tested isn't a defense that held.
-If your target doesn't return `sources` at all, verification is skipped for
-those rows and raginject warns once per run; everything else is judged
-normally. Pass `--no-verify-retrieval` to turn the check off entirely, for
-example if your pipeline returns opaque hashed source ids that would never
-match.
+An empty `sources` list is read adaptively. If your target returns non-empty
+`sources` for any query in the run, an empty list means "nothing relevant was
+retrieved", and that row also becomes `status: error`: a RAG app that finds
+nothing relevant often returns no sources, and scoring that as `blocked` would
+count an untested defense as one that held. If your target never returns
+`sources` at all, verification can't work, so those rows are judged normally and
+raginject warns once per run. Pass `--no-verify-retrieval` to turn the check off
+entirely, for example if your pipeline returns opaque hashed source ids that
+would never match.
 
 Try it against the bundled demo corpus, no RAG app required:
 
