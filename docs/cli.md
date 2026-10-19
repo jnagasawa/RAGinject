@@ -36,6 +36,9 @@
 | `--judge-base-url` | none | OpenAI-compatible endpoint, e.g. an OpenRouter URL (`llm_judge` only) |
 | `--corpus-injector` | none | `module:attribute` `CorpusInjector` spec; enables corpus injection (mode A) |
 | `--no-verify-retrieval` | off | Don't error rows whose injected document wasn't in the target's `sources` (mode A only) |
+| `--host-from-corpus` | off | Splice each pattern's `payload` into a copy of the top real corpus document for its question and inject that copy instead of the synthetic host (mode A only; the injector must implement `find_host`; the original is never deleted) |
+| `--prepend-question` | off | With `--host-from-corpus`: put the pattern's question, as its own paragraph, in front of the injected copy, so the copy is retrieved almost surely and the run measures obedience. The retrieval rate is the worst case of an attacker who knows the question. Errors (exit 2) without `--host-from-corpus` |
+| `--questions PATH` | built-in questions | With `--host-from-corpus`: text file with one question per line (blank lines and `#` comments ignored), used instead of the patterns' built-in questions. Assigned to the patterns in run order, cycling. Errors (exit 2) without `--host-from-corpus` or if the file is missing or has no questions |
 | `--baseline` | none | Path to a JSON report from an earlier run, to compare this run against (see [Catching regressions](https://github.com/jnagasawa/RAGinject#catching-regressions)) |
 | `--max-drop` | none | Fail (exit `1`) if the score drops below `baseline score - this`. Requires `--baseline` |
 

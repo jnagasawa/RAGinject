@@ -13,7 +13,30 @@ retrieval, not just generation.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import List, Optional
+
+#: Prefix of every document id raginject injects (`raginject-<pattern id>`).
+INJECTED_ID_PREFIX = "raginject-"
+
+
+def is_injected_id(value: object) -> bool:
+    """True if `value` is a string naming a document raginject injected."""
+    return isinstance(value, str) and value.startswith(INJECTED_ID_PREFIX)
+
+
+@dataclass
+class HostDocument:
+    """A real document (or chunk) from the user's corpus, used by
+    `--host-from-corpus` as the carrier for an attack payload.
+
+    `text` is the body to splice the payload into; `source` is a display name
+    for it (a path, title or id). Only `source` ever reaches a report - the
+    body is never written to one.
+    """
+
+    text: str
+    source: str
 
 
 def source_matches_document(sources: List[str], document_id: Optional[str]) -> bool:
@@ -77,3 +100,20 @@ class CorpusInjector(ABC):
         Must be idempotent: called with an id that was never inserted, or
         already removed, must not raise."""
         ...
+
+    def find_host(self, question: str) -> Optional[HostDocument]:
+        """Return the most relevant real document/chunk in the store for
+        `question` (top-1), or `None` if the store has nothing.
+
+        Anything raginject injected itself (ids starting with "raginject-")
+        must be excluded. Optional: only `--host-from-corpus` calls it, and
+        the default raises `NotImplementedError` (raginject checks for an
+        override before the run starts and refuses to proceed without one).
+
+        `--host-from-corpus` copies this document, splices the attack payload
+        into the copy and injects the copy; the original is left in place, so
+        a retriever may surface both.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement find_host()"
+        )

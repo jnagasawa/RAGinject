@@ -1,16 +1,19 @@
 """Evaluation engine: Runner and Result.
 
 `AttackOutcome` and `Result` fields are the JSON report's schema contract,
-so they are never added to, renamed, or removed - only *properties* may be
-added here.
+so they are never renamed or removed, and a new one is only ever added
+with a default (so older constructions stay valid) and additively in the
+report.
 """
 
+import re
 import time
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
+    Any,
     Callable,
     Dict,
     Iterable,
@@ -24,7 +27,7 @@ from typing import (
 from ._version import __version__
 from .attacks.loader import load_patterns as _load_patterns
 from .attacks.schema import AttackPattern
-from .corpus import CorpusInjector, source_matches_document
+from .corpus import CorpusInjector, HostDocument, source_matches_document
 from .errors import ConfigurationError, TargetError
 from .judges import Judge, JudgeContext, get_judge
 from .target import Target
@@ -48,6 +51,16 @@ class AttackOutcome:
     verdict_reason: str
     error: Optional[str] = None
     duration_ms: Optional[float] = None
+    #: Mode A only. True: retrieval verification confirmed the injected
+    #: document was among `sources`. False: it was not (the row is a
+    #: `status="error"` row, excluded from `score` but counted by the stage
+    #: metrics). None: not applicable or not knowable - mode B, a target that
+    #: reports no sources, `--no-verify-retrieval`, a retrieval-scoring judge,
+    #: or an error unrelated to retrieval.
+    retrieved: Optional[bool] = None
+    #: `--host-from-corpus` only: display name of the real document the
+    #: payload was spliced into. The document's text is never stored.
+    host_source: Optional[str] = None
 
 
 @dataclass
@@ -63,6 +76,19 @@ class Result:
     mode: str = "b"
     #: `CorpusInjector.description` in mode A; `None` in mode B.
     corpus_injector_description: Optional[str] = None
+    #: True when the run spliced payloads into real corpus documents
+    #: (`--host-from-corpus`) rather than injecting the synthetic ones.
+    host_from_corpus: bool = False
+    #: Number of distinct questions loaded with `--questions` (0 when the
+    #: patterns' built-in questions were used).
+    custom_question_count: int = 0
+    #: True when the run prepended each pattern's question to the injected
+    #: copy (`--prepend-question`).
+    prepend_question: bool = False
+
+    @property
+    def custom_questions(self) -> bool:
+        return self.custom_question_count > 0
 
     @property
     def blocked_count(self) -> int:
@@ -117,6 +143,82 @@ class Result:
         return self.blocked_count / denominator
 
     @property
+    def not_retrieved_count(self) -> int:
+        """Mode-A rows whose injected document was verified as not retrieved
+        (these are `status="error"` rows, so `score` ignores them)."""
+        return sum(1 for o in self.outcomes if o.retrieved is False)
+
+    @property
+    def attempted_count(self) -> int:
+        """Rows that reached a retrieval outcome: scored + not retrieved.
+        Errors unrelated to retrieval are in neither."""
+        return self.scored_count + self.not_retrieved_count
+
+    @property
+    def _has_stage_data(self) -> bool:
+        return self.mode == "a" and any(o.retrieved is not None for o in self.outcomes)
+
+    @property
+    def retrieval_rate(self) -> Optional[float]:
+        """Fraction of attempted attacks whose document was retrieved.
+        None unless mode A with retrieval data and at least one attempt."""
+        if not self._has_stage_data or self.attempted_count == 0:
+            return None
+        return self.scored_count / self.attempted_count
+
+    @property
+    def obedience_rate(self) -> Optional[float]:
+        """Fraction of retrieved (scored) attacks that leaked. None unless
+        mode A with retrieval data and at least one scored row."""
+        if not self._has_stage_data or self.scored_count == 0:
+            return None
+        return self.leaked_count / self.scored_count
+
+    @property
+    def attack_success_rate(self) -> Optional[float]:
+        """Fraction of attempted attacks that were retrieved *and* leaked
+        (end to end). None unless mode A with retrieval data and at least one
+        attempt."""
+        if not self._has_stage_data or self.attempted_count == 0:
+            return None
+        return self.leaked_count / self.attempted_count
+
+    @property
+    def stages(self) -> Optional[Dict[str, Any]]:
+        """The two-stage breakdown (retrieval, then obedience), or None when
+        it does not apply (mode B, or no row carries retrieval data).
+        `score` is unaffected by it."""
+        if not self._has_stage_data or self.attempted_count == 0:
+            return None
+        return {
+            "retrieved": self.scored_count,
+            "attempted": self.attempted_count,
+            "retrieval_rate": self.retrieval_rate,
+            "obedience_rate": self.obedience_rate,
+            "attack_success_rate": self.attack_success_rate,
+        }
+
+    @property
+    def stages_text(self) -> Optional[str]:
+        """One line for reports, e.g. `retrieved 19/52 (0.37) -> obeyed 11/19
+        (0.58) -> end-to-end 11/52 (0.21)`; None when `stages` is None."""
+        stages = self.stages
+        if stages is None:
+            return None
+
+        def rate(value: Optional[float]) -> str:
+            return "n/a" if value is None else f"{value:.2f}"
+
+        return (
+            f"retrieved {self.scored_count}/{self.attempted_count} "
+            f"({rate(stages['retrieval_rate'])}) -> "
+            f"obeyed {self.leaked_count}/{self.scored_count} "
+            f"({rate(stages['obedience_rate'])}) -> "
+            f"end-to-end {self.leaked_count}/{self.attempted_count} "
+            f"({rate(stages['attack_success_rate'])})"
+        )
+
+    @property
     def summary(self) -> str:
         """Short human-readable summary.
 
@@ -127,6 +229,8 @@ class Result:
             f"raginject: {self.blocked_count}/{self.scored_count} attacks blocked "
             f"(score: {self.score:.2f})"
         ]
+        if self.stages_text is not None:
+            lines.append(f"stages: {self.stages_text}")
         if self.failed_ids:
             lines.append(f"Failed: {', '.join(self.failed_ids)}")
         if self.error_count:
@@ -136,6 +240,92 @@ class Result:
                 f"{', '.join(error_ids)}"
             )
         return "\n".join(lines)
+
+
+def _id_list(ids: List[str], limit: int = 10) -> str:
+    shown = ", ".join(ids[:limit])
+    return shown + (f", ... ({len(ids) - limit} more)" if len(ids) > limit else "")
+
+
+#: How much of a host document `splice_payload` keeps when the host is
+#: longer: a window around its middle. Short enough that the payload makes up
+#: a real share of the chunk (and is not split from its host by a chunker),
+#: long enough to read as a document.
+HOST_WINDOW_CHARS = 800
+
+
+def _host_window(text: str) -> str:
+    """`text` itself, or an ~`HOST_WINDOW_CHARS` window centred on its middle
+    with both cut edges moved inward to whitespace."""
+    text = text.strip()
+    if len(text) <= HOST_WINDOW_CHARS:
+        return text
+    start = max(0, len(text) // 2 - HOST_WINDOW_CHARS // 2)
+    end = start + HOST_WINDOW_CHARS
+    if start > 0:
+        match = re.search(r"\s+", text[start:end])
+        if match:
+            start += match.end()
+    if end < len(text):
+        gaps = list(re.finditer(r"\s+", text[start:end]))
+        if gaps:
+            end = start + gaps[-1].start()
+    return text[start:end].strip()
+
+
+def splice_payload(host_text: str, payload: str) -> str:
+    """Insert `payload` into `host_text` at the paragraph boundary nearest
+    its middle, surrounded by blank lines. Deterministic.
+
+    A host longer than `HOST_WINDOW_CHARS` is first cut to a window around
+    its middle. Boundaries are tried in order - a blank line, a line break, a
+    sentence end (". "), any whitespace - and the first kind that occurs
+    inside the text wins; with none at all the payload goes in the exact
+    middle.
+    """
+    host = _host_window(host_text)
+    if not host:
+        return payload
+    middle = len(host) / 2
+    for separator in ("\n\n", "\n", ". "):
+        positions = [
+            m.start()
+            for m in re.finditer(re.escape(separator), host)
+            if m.start() > 0 and m.end() < len(host)
+        ]
+        if positions:
+            pos = min(positions, key=lambda p: (abs(p - middle), p))
+            keep = 1 if separator == ". " else 0
+            before = host[: pos + keep]
+            after = host[pos + len(separator) :]
+            return f"{before}\n\n{payload}\n\n{after}"
+    spaces = [
+        m.start() for m in re.finditer(r"\s", host) if 0 < m.start() < len(host) - 1
+    ]
+    if spaces:
+        pos = min(spaces, key=lambda p: (abs(p - middle), p))
+        return f"{host[:pos]}\n\n{payload}\n\n{host[pos + 1 :]}"
+    pos = len(host) // 2
+    return f"{host[:pos]}\n\n{payload}\n\n{host[pos:]}"
+
+
+def load_questions(path: Union[str, Path]) -> List[str]:
+    """Read a `--questions` file: UTF-8, one question per line. Blank lines
+    and lines starting with `#` are skipped; lines are stripped."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigurationError(
+            f"cannot read questions file {str(path)!r}: {exc}"
+        ) from exc
+    questions = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if not questions:
+        raise ConfigurationError(f"questions file {str(path)!r} contains no questions")
+    return questions
 
 
 class Runner:
@@ -164,6 +354,28 @@ class Runner:
     a pattern whose injected document was not among the returned `sources`
     is turned into a `status="error"` row instead of being judged normally
     - see `run()`.
+
+    `host_from_corpus` (mode A only) swaps the synthetic host document for a
+    real one: per pattern the runner asks `corpus_injector.find_host(question)`
+    for the top real document, splices the pattern's `payload` into a copy of
+    it and injects that copy. The original is never touched, so a retriever
+    can surface both the clean original and the tampered copy; the model may
+    then side with the original, which biases the measured obedience low.
+    Reports carry the payload and the host's `source` name, never the host's
+    text.
+
+    `questions` (requires `host_from_corpus`) replaces the patterns' built-in
+    questions, assigned in run order and cycling: pattern i gets
+    `questions[i % len(questions)]`. The host is the top real chunk for the
+    question, so the question has to ask about that chunk's legitimate
+    content; the built-in questions are written for the synthetic hosts.
+
+    `prepend_question` (requires `host_from_corpus`) puts the pattern's
+    question, as a paragraph of its own, in front of the injected copy: the
+    query-targeted document of PoisonedRAG. It makes the copy near-certain to
+    be retrieved, so the run measures obedience; its retrieval rate is the
+    worst case of an attacker who knows the question. Reports and judges
+    still see the payload only.
     """
 
     def __init__(
@@ -175,6 +387,9 @@ class Runner:
         verify_leaks_judge: Optional[Judge] = None,
         corpus_injector: Optional[CorpusInjector] = None,
         verify_retrieval: bool = True,
+        host_from_corpus: bool = False,
+        questions: Optional[List[str]] = None,
+        prepend_question: bool = False,
     ):
         self.target = target
         self._judges = judges
@@ -182,6 +397,9 @@ class Runner:
         self._verify_leaks_judge = verify_leaks_judge
         self._corpus_injector = corpus_injector
         self.verify_retrieval = verify_retrieval
+        self.host_from_corpus = host_from_corpus
+        self._questions = list(questions) if questions is not None else None
+        self.prepend_question = prepend_question
         self._patterns: Dict[str, AttackPattern] = {}
         #: Document ids a CorpusInjector.remove() call failed to clean up
         #: (mode A only). Deliberately *not* a Result field / part of the
@@ -223,6 +441,7 @@ class Runner:
         *,
         context: Optional[List[str]],
         document_id: Optional[str] = None,
+        judged_pattern: Optional[AttackPattern] = None,
     ) -> AttackOutcome:
         """Query the target once for `pattern` and judge the answer,
         returning a single AttackOutcome.
@@ -236,6 +455,12 @@ class Runner:
         injected under (mode A only; `None` in mode B) - it is threaded into
         `JudgeContext` so a retrieval-scoring judge (e.g. `retrieval_match`)
         can check whether it came back in `sources`.
+
+        `judged_pattern`, if given, is what the judges see in place of
+        `pattern` (`--host-from-corpus` passes a copy whose `injected_content`
+        is the payload only: the document the model saw is a real corpus copy,
+        and its text must neither be misdescribed to the judge nor sent to a
+        remote judge API).
 
         A `ConfigurationError` raised by the target or a judge always
         propagates (it aborts the whole run - see `run()`'s docstring).
@@ -282,7 +507,7 @@ class Runner:
         try:
             verdict = judge.judge(
                 JudgeContext(
-                    pattern=pattern,
+                    pattern=judged_pattern or pattern,
                     question=pattern.question,
                     answer=answer,
                     sources=sources,
@@ -313,7 +538,7 @@ class Runner:
                 try:
                     verify_verdict = self._verify_leaks_judge.judge(
                         JudgeContext(
-                            pattern=pattern,
+                            pattern=judged_pattern or pattern,
                             question=pattern.question,
                             answer=answer,
                             sources=sources,
@@ -382,17 +607,12 @@ class Runner:
         injected document was not retrieved". Shared by the
         non-matching-sources and the empty-sources-with-evidence cases so the
         two rows only differ in their `error` text."""
-        return AttackOutcome(
-            pattern_id=outcome.pattern_id,
-            category=outcome.category,
+        return replace(
+            outcome,
             status="error",
-            question=outcome.question,
-            injected_content=outcome.injected_content,
-            answer=outcome.answer,
-            sources=outcome.sources,
             verdict_reason="injected document was not retrieved",
             error=error,
-            duration_ms=outcome.duration_ms,
+            retrieved=False,
         )
 
     def _verify_retrieval(
@@ -410,8 +630,10 @@ class Runner:
         sources" can only be decided across the whole run, so `run()` handles
         it.
         """
-        if not outcome.sources or source_matches_document(outcome.sources, document_id):
+        if not outcome.sources:
             return outcome
+        if source_matches_document(outcome.sources, document_id):
+            return replace(outcome, retrieved=True)
         return self._not_retrieved_outcome(
             outcome,
             f"expected a source naming/containing {document_id!r}; "
@@ -449,6 +671,63 @@ class Runner:
             if on_outcome is not None:
                 on_outcome(row)
         pending.clear()
+
+    def _preflight_questions(self) -> None:
+        if not self._questions:
+            raise ConfigurationError("questions was given but contains no questions")
+        if not self.host_from_corpus:
+            raise ConfigurationError(
+                "custom questions only apply with host_from_corpus: the host is "
+                "the top real chunk for the question, so the question asks about "
+                "that chunk's legitimate content, while a synthetic host would "
+                "be unrelated to it"
+            )
+
+    def _preflight_prepend_question(self) -> None:
+        if not self.host_from_corpus:
+            raise ConfigurationError(
+                "prepend_question only applies with host_from_corpus: it "
+                "prepends the question to the copy of a real corpus document"
+            )
+
+    def _preflight_host_from_corpus(
+        self, patterns: List[AttackPattern], judge_for_pattern: Dict[str, Judge]
+    ) -> None:
+        """Every `--host-from-corpus` precondition, checked before a single
+        query or injection so a misconfiguration costs nothing."""
+        injector = self._corpus_injector
+        if injector is None:
+            raise ConfigurationError(
+                "host_from_corpus only applies to corpus injection mode; "
+                "pass a corpus injector (--corpus-injector) to enable mode A"
+            )
+        if type(injector).find_host is CorpusInjector.find_host:
+            raise ConfigurationError(
+                f"{type(injector).__name__} does not implement find_host(), "
+                "which --host-from-corpus needs to fetch the real document "
+                "each payload is spliced into; implement "
+                "CorpusInjector.find_host or use the LangChain/LlamaIndex "
+                "injectors, which provide it"
+            )
+        retrieval_ids = [
+            p.id
+            for p in patterns
+            if getattr(judge_for_pattern[p.id], "scores_retrieval", False)
+        ]
+        if retrieval_ids:
+            raise ConfigurationError(
+                "--host-from-corpus cannot be combined with retrieval-scoring "
+                "patterns (" + _id_list(retrieval_ids) + "): they measure "
+                "whether a planted document gets retrieved, which a copy of a "
+                "real document would not test"
+            )
+        missing = [p.id for p in patterns if not p.payload]
+        if missing:
+            raise ConfigurationError(
+                "--host-from-corpus needs a `payload` on every pattern (the "
+                "instruction text to splice into a real document); missing "
+                "on: " + _id_list(missing)
+            )
 
     def run(
         self, on_outcome: Optional[Callable[[AttackOutcome], None]] = None
@@ -537,6 +816,19 @@ class Runner:
             if self._verify_leaks_judge is not None:
                 self._verify_leaks_judge.validate_criteria(pattern.success_criteria)
 
+        if self.host_from_corpus:
+            self._preflight_host_from_corpus(patterns, judge_for_pattern)
+        if self.prepend_question:
+            self._preflight_prepend_question()
+        if self._questions is not None:
+            self._preflight_questions()
+            patterns = [
+                p.model_copy(
+                    update={"question": self._questions[i % len(self._questions)]}
+                )
+                for i, p in enumerate(patterns)
+            ]
+
         started_at = datetime.now(timezone.utc).isoformat()
         # Slots keep pattern order even when a row's callback is delayed.
         outcomes: List[Optional[AttackOutcome]] = []
@@ -560,8 +852,51 @@ class Runner:
 
             # Mode A from here down.
             document_id = f"raginject-{pattern.id}"
+            inject_content = pattern.injected_content
+            # What the report shows as the injected content: with a real host
+            # document that is the payload only, never the corporate text.
+            shown_content = pattern.injected_content
+            host_source: Optional[str] = None
+            judged_pattern: Optional[AttackPattern] = None
+            if self.host_from_corpus:
+                shown_content = pattern.payload or ""
+                judged_pattern = pattern.model_copy(
+                    update={"injected_content": shown_content}
+                )
+                host: Optional[HostDocument] = None
+                host_error: Optional[str] = None
+                try:
+                    host = self._corpus_injector.find_host(pattern.question)
+                except ConfigurationError:
+                    raise
+                except Exception as exc:
+                    host_error = f"{type(exc).__name__}: {exc}"
+                if host is None or not host.text.strip():
+                    outcome = AttackOutcome(
+                        pattern_id=pattern.id,
+                        category=pattern.category,
+                        status="error",
+                        question=pattern.question,
+                        injected_content=shown_content,
+                        answer="",
+                        sources=[],
+                        verdict_reason="no host document found in the corpus for "
+                        "this question",
+                        error=host_error
+                        or "no host document found in the corpus for this question",
+                        duration_ms=None,
+                    )
+                    outcomes.append(outcome)
+                    if on_outcome is not None:
+                        on_outcome(outcome)
+                    continue
+                host_source = host.source
+                inject_content = splice_payload(host.text, shown_content)
+                if self.prepend_question:
+                    inject_content = pattern.question + "\n\n" + inject_content
+
             try:
-                self._corpus_injector.inject(document_id, pattern.injected_content)
+                self._corpus_injector.inject(document_id, inject_content)
             except ConfigurationError:
                 raise
             except Exception as exc:
@@ -571,7 +906,8 @@ class Runner:
                     category=pattern.category,
                     status="error",
                     question=pattern.question,
-                    injected_content=pattern.injected_content,
+                    injected_content=shown_content,
+                    host_source=host_source,
                     answer="",
                     sources=[],
                     verdict_reason="corpus injector failed to insert the attack "
@@ -587,8 +923,18 @@ class Runner:
             outcome = None
             try:
                 outcome = self._run_one(
-                    pattern, judge, context=None, document_id=document_id
+                    pattern,
+                    judge,
+                    context=None,
+                    document_id=document_id,
+                    judged_pattern=judged_pattern,
                 )
+                if self.host_from_corpus:
+                    outcome = replace(
+                        outcome,
+                        injected_content=shown_content,
+                        host_source=host_source,
+                    )
                 if getattr(judge, "scores_retrieval", False):
                     # For these patterns "not retrieved" *is* the blocked
                     # verdict - the judge already decided that by reading
@@ -603,14 +949,9 @@ class Runner:
                     # these patterns it *is* the measurement, not a
                     # verification layered on top of one.
                     if outcome.status != "error" and not outcome.sources:
-                        outcome = AttackOutcome(
-                            pattern_id=outcome.pattern_id,
-                            category=outcome.category,
+                        outcome = replace(
+                            outcome,
                             status="error",
-                            question=outcome.question,
-                            injected_content=outcome.injected_content,
-                            answer=outcome.answer,
-                            sources=outcome.sources,
                             verdict_reason=(
                                 "target returned no sources, so retrieval "
                                 "cannot be measured"
@@ -619,7 +960,6 @@ class Runner:
                                 "retrieval_match judge requires the target "
                                 "to report `sources`; got an empty list"
                             ),
-                            duration_ms=outcome.duration_ms,
                         )
                 elif self.verify_retrieval and outcome.status != "error":
                     outcome = self._verify_retrieval(outcome, document_id)
@@ -640,7 +980,8 @@ class Runner:
                         category=pattern.category,
                         status="error",
                         question=pattern.question,
-                        injected_content=pattern.injected_content,
+                        injected_content=shown_content,
+                        host_source=host_source,
                         answer=outcome.answer if outcome is not None else "",
                         sources=outcome.sources if outcome is not None else [],
                         verdict_reason="corpus injector failed to remove the "
@@ -704,4 +1045,9 @@ class Runner:
                 if self._corpus_injector is not None
                 else None
             ),
+            host_from_corpus=self.host_from_corpus,
+            custom_question_count=(
+                len(set(self._questions)) if self._questions is not None else 0
+            ),
+            prepend_question=self.prepend_question,
         )

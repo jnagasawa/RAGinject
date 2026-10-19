@@ -7,12 +7,15 @@ so that importing this module never requires `llama-index-core`.
 import warnings
 from typing import Any, List, Optional
 
-from ..corpus import CorpusInjector
+from ..corpus import CorpusInjector, HostDocument, is_injected_id
 from ..errors import ConfigurationError
 from ..target import QueryResult, Target, normalize_query_result
 from ._common import call_wrapped, reject_context
 
 _INJECTOR = "LlamaIndexInjector"
+
+#: How many nearest nodes `find_host` fetches before skipping injected ones.
+_HOST_FETCH_K = 4
 
 
 class LlamaIndexInjector(CorpusInjector):
@@ -44,6 +47,34 @@ class LlamaIndexInjector(CorpusInjector):
 
     def remove(self, document_id: str) -> None:
         self.index.delete_ref_doc(document_id, delete_from_docstore=True)
+
+    def find_host(self, question: str) -> Optional[HostDocument]:
+        """Top-1 real node for `question`, via the index's retriever. Fetches
+        a few so skipping nodes raginject injected still leaves a result."""
+        retriever = self.index.as_retriever(similarity_top_k=_HOST_FETCH_K)
+        for item in retriever.retrieve(question) or []:
+            node = getattr(item, "node", item)
+            metadata = getattr(node, "metadata", None) or {}
+            ref_doc_id = getattr(node, "ref_doc_id", None)
+            node_id = getattr(node, "node_id", None)
+            if (
+                is_injected_id(ref_doc_id)
+                or is_injected_id(node_id)
+                or is_injected_id(metadata.get("source"))
+            ):
+                continue
+            text = node.get_content()
+            if not isinstance(text, str) or not text.strip():
+                continue
+            source = (
+                metadata.get("file_name")
+                or metadata.get("source")
+                or ref_doc_id
+                or node_id
+                or "unknown"
+            )
+            return HostDocument(text=text, source=str(source))
+        return None
 
 
 def _warn_if_node_ids_pinned(engine: Any) -> None:

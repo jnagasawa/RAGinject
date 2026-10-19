@@ -25,3 +25,9 @@ class AttackPattern(BaseModel):
     injected_content: str
     question: str
     success_criteria: SuccessCriteria
+    # The instruction part of `injected_content`, as an exact substring of
+    # it. Required for default-corpus patterns (enforced by the test suite,
+    # not here, so user-written patterns without one stay valid); used by
+    # `--host-from-corpus`, which splices only this into a real corpus
+    # document instead of injecting the synthetic host document around it.
+    payload: Optional[str] = None

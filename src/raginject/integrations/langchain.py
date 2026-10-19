@@ -7,12 +7,15 @@ Duck typed: nothing from `langchain` is imported here. The injector only calls
 
 from typing import Any, List, Optional
 
-from ..corpus import CorpusInjector
+from ..corpus import CorpusInjector, HostDocument, is_injected_id
 from ..errors import TargetResponseError
 from ..target import QueryResult, Target, normalize_query_result
 from ._common import call_wrapped, reject_context
 
 _INJECTOR = "LangChainVectorStoreInjector"
+
+#: How many nearest documents `find_host` fetches before skipping injected ones.
+_HOST_FETCH_K = 4
 
 
 class LangChainVectorStoreInjector(CorpusInjector):
@@ -37,6 +40,24 @@ class LangChainVectorStoreInjector(CorpusInjector):
 
     def remove(self, document_id: str) -> None:
         self.vectorstore.delete(ids=[document_id])
+
+    def find_host(self, question: str) -> Optional[HostDocument]:
+        """Top-1 real document for `question`, via `similarity_search`.
+        Fetches a few so skipping documents raginject injected still leaves
+        a result."""
+        docs = self.vectorstore.similarity_search(question, k=_HOST_FETCH_K)
+        for doc in docs or []:
+            metadata = getattr(doc, "metadata", None)
+            metadata = metadata if isinstance(metadata, dict) else {}
+            doc_id = getattr(doc, "id", None)
+            if is_injected_id(metadata.get("source")) or is_injected_id(doc_id):
+                continue
+            text = getattr(doc, "page_content", None)
+            if not isinstance(text, str) or not text.strip():
+                continue
+            source = metadata.get("source") or doc_id or "unknown"
+            return HostDocument(text=text, source=str(source))
+        return None
 
 
 def _text_of(value: Any) -> Optional[str]:

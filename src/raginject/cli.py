@@ -31,7 +31,7 @@ from .attacks.loader import (
     load_patterns,
 )
 from .baseline import check_comparable, compare, load_baseline
-from .core import Runner
+from .core import Runner, load_questions
 from .errors import ConfigurationError, RagInjectError
 from .report import ReportOptions, available_formatters, get_formatter
 from .resolve import (
@@ -280,6 +280,34 @@ def _resolve_color(explicit: Optional[bool], is_tty: bool) -> bool:
     "(mode A only)",
 )
 @click.option(
+    "--host-from-corpus",
+    is_flag=True,
+    default=False,
+    help="corpus injection only: for each question, copy the top real document "
+    "from your corpus, splice the attack payload into the copy and inject the "
+    "copy (instead of a synthetic document); the original is never deleted or "
+    "replaced. Needs an injector that implements find_host",
+)
+@click.option(
+    "--prepend-question",
+    "prepend_question",
+    is_flag=True,
+    default=False,
+    help="with --host-from-corpus: put the question in front of the injected "
+    "copy so it is retrieved almost surely; the run then measures obedience, "
+    "and its retrieval rate is the worst case of an attacker who knows the "
+    "question",
+)
+@click.option(
+    "--questions",
+    "questions_path",
+    default=None,
+    type=click.Path(),
+    help="with --host-from-corpus: text file, one question per line (blank "
+    "lines and # comments ignored), used instead of the patterns' built-in "
+    "questions; assigned to patterns in order, cycling",
+)
+@click.option(
     "--baseline",
     default=None,
     type=click.Path(),
@@ -318,6 +346,9 @@ def run(
     judge_base_url,
     corpus_injector,
     no_verify_retrieval,
+    host_from_corpus,
+    questions_path,
+    prepend_question,
     baseline,
     max_drop,
 ):
@@ -388,6 +419,29 @@ def run(
                 "pass --corpus-injector to enable mode A"
             )
 
+        if host_from_corpus and not corpus_injector:
+            # Same rule as --no-verify-retrieval: there is no corpus to copy
+            # a document from in mode B, and a silently ignored flag would
+            # report a different measurement than the user asked for.
+            raise ConfigurationError(
+                "--host-from-corpus only applies to corpus injection mode; "
+                "pass --corpus-injector to enable mode A"
+            )
+
+        if questions_path is not None and not host_from_corpus:
+            raise ConfigurationError(
+                "--questions only applies with --host-from-corpus: the host is "
+                "the top real chunk for the question, so the question asks "
+                "about that chunk's legitimate content, while a synthetic host "
+                "would be unrelated to it"
+            )
+        if prepend_question and not host_from_corpus:
+            raise ConfigurationError(
+                "--prepend-question only applies with --host-from-corpus: it "
+                "prepends the question to the copy of a real corpus document"
+            )
+        questions = load_questions(questions_path) if questions_path else None
+
         if max_drop is not None and baseline is None:
             # Same "never silently ignore a flag" rule as
             # --no-verify-retrieval above: a --max-drop with nothing to
@@ -429,6 +483,9 @@ def run(
             verify_leaks_judge=verify_leaks_judge,
             corpus_injector=injector,
             verify_retrieval=not no_verify_retrieval,
+            host_from_corpus=host_from_corpus,
+            questions=questions,
+            prepend_question=prepend_question,
         )
         _load_all_patterns(runner, patterns, no_default_patterns, pattern_set)
 

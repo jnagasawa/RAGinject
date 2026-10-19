@@ -41,7 +41,7 @@ import re
 from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
-from .corpus import CorpusInjector
+from .corpus import CorpusInjector, HostDocument
 from .target import QueryResult
 
 _QUOTED = re.compile(r'"([^"]{3,})"')
@@ -123,6 +123,15 @@ class _DemoCorpus(CorpusInjector):
         # Idempotent per the CorpusInjector contract: removing an id that
         # was never inserted (or already removed) must not raise.
         self._documents.pop(document_id, None)
+
+    def find_host(self, question: str) -> Optional[HostDocument]:
+        """The `_BENIGN_CORPUS` document ranking first for `question`.
+        Injected documents are not candidates, so nothing raginject wrote can
+        be chosen as its own host."""
+        ranked_ids = _rank_by_term_frequency(question, _BENIGN_CORPUS)
+        if not ranked_ids:
+            return None
+        return HostDocument(text=_BENIGN_CORPUS[ranked_ids[0]], source=ranked_ids[0])
 
     def retrieve(self) -> List[Tuple[str, str]]:
         """Return every currently-injected `(document_id, content)` pair.

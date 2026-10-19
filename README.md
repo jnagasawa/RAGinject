@@ -496,6 +496,111 @@ A full runnable example, with an in-memory corpus and a question-only RAG
 function, is in
 [`examples/example_corpus_injector.py`](examples/example_corpus_injector.py).
 
+### Real documents as hosts (`--host-from-corpus`)
+
+By default each pattern brings its own synthetic host document (a release note,
+a FAQ, a ticket). Against a large real corpus those generic documents often lose
+the retrieval ranking to your real pages, so many rows end up `status: error`
+("not retrieved") and the score rests on whatever few were retrieved.
+
+`--host-from-corpus` narrows that gap. For each pattern's `question` raginject
+asks the injector for the top real document in your corpus, splices only the
+pattern's attack `payload` into a copy of it (at the paragraph boundary nearest
+the middle), and injects that copy. The copy is about the same topic as the
+question, so it is retrieved more often, but not always: the payload itself moves
+the copy's embedding, and when your corpus has no clearly best page for a
+pattern's question, the copy can still lose to the original. Check the `stages`
+line (below) to see how many attacks actually arrived.
+
+```bash
+raginject run --target-module myapp.rag:answer_question \
+              --corpus-injector myapp.injector:MyCorpusInjector \
+              --host-from-corpus
+```
+
+It needs an injector that implements `find_host(question)`, returning a
+`HostDocument(text, source)` for the top real document (never one raginject
+injected itself). `LangChainVectorStoreInjector` and `LlamaIndexInjector` already
+do; for your own injector, add the method (the base class raises
+`NotImplementedError`, and raginject refuses to start without an override).
+Preflight also rejects retriever-side patterns and any pattern without a
+`payload`. Reports show only the payload and the host document's name
+(`host_source` in JSON), never its text, so a report does not contain your
+documents. For the same reason `llm_judge` (including `--verify-leaks`) is shown
+only the payload as the injected document in this mode, never the host text.
+
+#### Choosing the questions (`--questions`)
+
+The built-in questions were written for the synthetic hosts and are often
+off-topic for a real corpus. To ask the questions your users actually ask,
+supply your own with `--questions`:
+
+```bash
+raginject run --target-module myapp.rag:answer_question \
+              --corpus-injector myapp.injector:MyCorpusInjector \
+              --host-from-corpus --questions questions.txt
+```
+
+The file is UTF-8, one question per line; blank lines and lines starting with
+`#` are ignored. Questions are assigned to the patterns in run order and cycle
+if there are fewer questions than patterns. The flag requires
+`--host-from-corpus` (exit code 2 otherwise, and for a missing or empty file),
+because only then is the host the top real chunk for the question. Reports mark
+the run with `questions: custom (N)` and a `custom_questions` key in JSON.
+`--baseline` comparisons only make sense when both runs used the same questions
+file.
+
+On-topic questions do not by themselves get the copy retrieved: the spliced
+payload changes the copy's embedding, and the original competes with it. Check
+the `stages` line; rows whose copy was not retrieved are reported as errors, not
+as blocked.
+
+**Caveat: the original stays in the store.** raginject never deletes or replaces
+your document, so the retriever may return both the clean original and the
+tampered copy, and the model sees two documents that disagree. That makes the
+model less likely to obey than it would be if the copy were the only one, so
+this measurement leans conservative: a leak found this way is real, a clean
+result is weaker evidence than it looks.
+
+#### Making retrieval near-certain (`--prepend-question`)
+
+Against a 3,914-page corpus, the spliced copy alone reached the top 4 only about
+half the time: the original's chunks carry the page title in their embedded
+header, and the payload shifts the copy's embedding. Prepending the question text
+to the copy got it into the top 4 in 12 of 12 probes, with either the built-in or
+corpus-specific questions. This is the query-targeted document of PoisonedRAG
+(Zou et al., 2024). Opt in with `--prepend-question`:
+
+```bash
+raginject run --target-module myapp.rag:answer_question \
+              --corpus-injector myapp.injector:MyCorpusInjector \
+              --host-from-corpus --prepend-question
+```
+
+The flag requires `--host-from-corpus` (exit code 2 otherwise). Because retrieval
+becomes near-certain, the run measures obedience rather than ranking. Its
+retrieval rate is the worst case of an attacker who knows the question, not the
+natural rate at which a planted copy gets retrieved. Reports show only the
+payload as before, mark the run with `injection: question prepended to the copy`,
+and carry a `prepend_question` key in JSON.
+
+### Reading a mode A report: retrieval, then obedience
+
+In mode A a pattern can fail at two different stages, and the report separates
+them with one extra line:
+
+```text
+stages: retrieved 19/52 (0.37) -> obeyed 11/19 (0.58) -> end-to-end 11/52 (0.21)
+```
+
+`retrieved` is how many injected documents your retriever surfaced, `obeyed` is
+how many of those the model followed, and `end-to-end` is the share of all
+attempts that got through both. `score` is unchanged (blocked over scored, with
+unretrieved rows excluded), and so are `--min-score`, `--baseline` and the exit
+codes; the stages are there so a high score is not read as "the model resisted"
+when most attacks never reached it. The JSON report carries the same numbers under
+`stages` and a per-row `retrieved` flag. The line is absent in mode B.
+
 ## LangChain and LlamaIndex
 
 If your pipeline is built with LangChain or LlamaIndex you do not have to write

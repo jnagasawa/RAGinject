@@ -22,7 +22,10 @@ if TYPE_CHECKING:
 #: can tell which report format it is comparing against. v2 added the
 #: top-level "mode" ("a"/"b") and "corpus_injector_description" keys when
 #: corpus injection (mode A) was implemented. v3 added the top-level
-#: "baseline" key (null unless a --baseline comparison was made).
+#: "baseline" key (null unless a --baseline comparison was made). Later
+#: additive keys that did not bump the version: per-outcome "retrieved" and
+#: "host_source", and top-level "host_from_corpus", "custom_questions", "prepend_question" and
+#: "stages" (the two-stage breakdown, null outside mode A); readers must ignore keys they don't know.
 REPORT_SCHEMA_VERSION = 3
 
 #: Plain ANSI SGR codes. report.py stays click-free on purpose (it is the
@@ -87,6 +90,8 @@ def _outcome_to_dict(outcome: AttackOutcome, options: ReportOptions) -> Dict[str
         "verdict_reason": outcome.verdict_reason,
         "error": outcome.error,
         "duration_ms": outcome.duration_ms,
+        "retrieved": outcome.retrieved,
+        "host_source": outcome.host_source,
     }
 
 
@@ -121,6 +126,9 @@ def result_to_dict(result: Result, options: "ReportOptions" = None) -> Dict[str,
         "pattern_count": result.pattern_count,
         "mode": result.mode,
         "corpus_injector_description": result.corpus_injector_description,
+        "host_from_corpus": result.host_from_corpus,
+        "custom_questions": result.custom_questions,
+        "prepend_question": result.prepend_question,
         "score": result.score,
         "counts": {
             "blocked": result.blocked_count,
@@ -128,6 +136,7 @@ def result_to_dict(result: Result, options: "ReportOptions" = None) -> Dict[str,
             "error": result.error_count,
             "scored": result.scored_count,
         },
+        "stages": result.stages,
         "outcomes": [_outcome_to_dict(o, options) for o in result.outcomes],
         "baseline": baseline_dict,
     }
@@ -252,6 +261,12 @@ def format_text(result: Result, options: "ReportOptions" = None) -> str:
         f"blocked={result.blocked_count} leaked={result.leaked_count} "
         f"error={result.error_count}"
     )
+    if result.stages_text is not None:
+        lines.append(f"stages: {result.stages_text}")
+    if result.custom_questions:
+        lines.append(f"questions: custom ({result.custom_question_count})")
+    if result.prepend_question:
+        lines.append("injection: question prepended to the copy")
 
     category_counts = result.category_counts
     if category_counts:
@@ -384,6 +399,15 @@ def format_markdown(result: Result, options: "ReportOptions" = None) -> str:
         f"(blocked={result.blocked_count} leaked={result.leaked_count} "
         f"error={result.error_count})"
     )
+    if result.stages_text is not None:
+        lines.append("")
+        lines.append(f"**stages:** {result.stages_text}")
+    if result.custom_questions:
+        lines.append("")
+        lines.append(f"**questions:** custom ({result.custom_question_count})")
+    if result.prepend_question:
+        lines.append("")
+        lines.append("**injection:** question prepended to the copy")
 
     category_counts = result.category_counts
     if category_counts:
@@ -533,6 +557,14 @@ def format_html(result: Result, options: "ReportOptions" = None) -> str:
         f"(blocked={result.blocked_count} leaked={result.leaked_count} "
         f"error={result.error_count})</p>"
     )
+    if result.stages_text is not None:
+        body.append(f"<p><strong>stages:</strong> {esc(result.stages_text)}</p>")
+    if result.custom_questions:
+        body.append(
+            f"<p><strong>questions:</strong> custom ({result.custom_question_count})</p>"
+        )
+    if result.prepend_question:
+        body.append("<p><strong>injection:</strong> question prepended to the copy</p>")
 
     category_counts = result.category_counts
     if category_counts:
