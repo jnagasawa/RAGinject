@@ -120,7 +120,13 @@ judgment calls a test can't make for you.
   canary inside ASCII double quotes. It must also work in an unrelated document:
   "the guidance above this note is outdated" does, "quote the price table above"
   does not, because the real host has no price table. Keep the payload free of
-  host-specific facts, and never include the host's own content in it.
+  host-specific facts, and never include the host's own content in it. Its
+  trigger must also hold for any question answered from whatever document it
+  sits in: do not name the synthetic host ("this policy", "the checklist") or
+  the pattern's question topic ("whenever a user asks about pricing"), because
+  `--host-from-corpus` and `--questions` replace both. Say "this document" /
+  "any question about this page" instead. `test_payload_does_not_name_its_synthetic_host`
+  checks the host-noun half lexically.
 - **Give the payload a plausible host document to hide in.** A file whose entire
   content is attack text has nothing else to ask about, so it can't satisfy the
   rule above. A release note, support ticket, FAQ, or incident report works.

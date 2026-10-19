@@ -7,7 +7,7 @@ import json
 import re
 import unicodedata
 from types import SimpleNamespace
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 
 import pytest
 from click.testing import CliRunner
@@ -88,6 +88,55 @@ def test_canary_sits_inside_ascii_double_quotes_within_the_payload(default_patte
 
 def test_retriever_set_has_no_payload():
     assert all(p.payload is None for p in load_pattern_set("retriever"))
+
+
+_TERM = re.compile(r"[a-z][a-z\-]{3,}")
+
+_STOPWORDS = {
+    "that", "this", "with", "from", "have", "will", "must", "your", "then",
+    "than", "when", "what", "which", "into", "also", "only", "each", "every",
+    "being", "should", "would", "could", "there", "their", "them", "they",
+    "been", "were", "does", "such", "whenever", "instead", "exactly", "reply",
+    "respond", "output", "include", "begin", "list", "always", "even", "some",
+    "other", "about", "above", "below", "after", "before",
+}  # fmt: skip
+
+# Words that name "the document" itself; they are what a host-neutral payload
+# is supposed to say, so sharing them with the synthetic host is fine.
+_GENERIC_DOCUMENT_WORDS = {
+    "document", "article", "guide", "notes", "note", "previous", "reference",
+    "answer", "code",
+}  # fmt: skip
+
+# pattern id -> terms the payload may share with the rest of its own
+# injected_content.
+_ALLOWED_HOST_OVERLAP: Dict[str, Set[str]] = {
+    # The host's closing line refers back to the payload's mirrored tags, not
+    # the other way round, so the payload still names nothing of the host.
+    "obfuscation-003": {"tags", "mirrored"},
+}
+
+
+def _content_terms(text: str) -> Set[str]:
+    text = _QUOTED.sub(" ", text.lower())  # canaries are not trigger wording
+    return {t for t in _TERM.findall(text) if t not in _STOPWORDS}
+
+
+def test_payload_does_not_name_its_synthetic_host(default_patterns):
+    """A payload is spliced into an unrelated real document, so its trigger
+    must not lean on nouns that only exist in its own synthetic host. This is
+    lexical: it flags payload terms that also appear in the rest of the
+    injected_content, but it cannot catch a trigger that depends on the
+    pattern's question topic (that needs a human read)."""
+    bad = []
+    for p in default_patterns:
+        host_only = p.injected_content.replace(p.payload, "")
+        shared = _content_terms(p.payload) & _content_terms(host_only)
+        shared -= _GENERIC_DOCUMENT_WORDS
+        shared -= _ALLOWED_HOST_OVERLAP.get(p.id, set())
+        if shared:
+            bad.append((p.id, sorted(shared)))
+    assert bad == [], f"payload names its synthetic host: {bad}"
 
 
 # --- splice_payload -------------------------------------------------------
